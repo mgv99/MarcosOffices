@@ -50,6 +50,7 @@ import {
   setDepartmentHead,
   seedOffice,
   ensureCeoOffice,
+  relayoutFloor,
   clamp,
 } from './operations.js';
 
@@ -809,6 +810,10 @@ export async function createServer() {
 
   const reaped = reapStaleApprovals();
   if (reaped) console.log(`[office] cleared ${reaped} approval(s) abandoned by the last session`);
+
+  // Tidy the floor plan on the way in, so a room closed by an older version —
+  // which left a hole where it stood — does not leave the office gap-toothed.
+  relayoutFloor();
 
   startWatchingExternalSessions();
   startScheduler();

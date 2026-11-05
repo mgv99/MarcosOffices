@@ -308,6 +308,11 @@ export function deleteDepartment(id) {
   }
 
   store.state.departments = store.state.departments.filter((d) => d.id !== id);
+
+  // Close the gap: the rooms behind it shuffle up rather than leaving a hole
+  // in the middle of the floor.
+  relayoutFloor();
+
   store.save();
   bus.emitEvent('department.deleted', { id });
   return { ok: true };
