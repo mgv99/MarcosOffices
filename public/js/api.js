@@ -98,7 +98,7 @@ export function connectEvents(onEvent, onStatusChange) {
     // The server names every event, so listen broadly.
     for (const type of [
       'agent.status', 'agent.activity', 'agent.created', 'agent.updated',
-      'agent.deleted', 'agent.memory', 'agent.shift', 'agent.stats', 'agent.todos',
+      'agent.deleted', 'agent.memory', 'agent.shift', 'agent.stats', 'agent.todos', 'agent.commands',
       'department.created', 'department.updated', 'department.deleted',
       'project.created', 'project.updated', 'project.deleted',
       'approval.new', 'approval.decided', 'approval.escalated', 'approval.ceo-ruling',

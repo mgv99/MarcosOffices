@@ -326,6 +326,31 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
 
 .approval { border-color: var(--amber); }
 .approval[data-route="lord"] { border-color: var(--gold); }
+/* --- slash command palette ------------------------------------------------ */
+
+.cmd-palette {
+  display: flex;
+  flex-direction: column;
+  max-height: 210px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  border: 2px solid var(--line-bright);
+  background: var(--bg);
+}
+
+.cmd-item {
+  text-align: left;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--green);
+  cursor: pointer;
+  font-size: 12px;
+}
+.cmd-item:last-child { border-bottom: none; }
+.cmd-item:hover { background: var(--panel-2); color: var(--gold); }
+
 /* --- a question awaiting your answer -------------------------------------- */
 
 .question { border-color: var(--violet); }

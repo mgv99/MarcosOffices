@@ -83,6 +83,7 @@ export class AgentWorker {
     this.lastError = null;
     this.stopping = false;
     this.todos = [];
+    this.commands = [];
     // Guards against looping if a fresh session also fails to start.
     this._resumeRetried = false;
     this._logStream = null;
@@ -514,9 +515,21 @@ export class AgentWorker {
           this.sessionId = message.session_id || this.sessionId;
           const agent = this.agent;
           if (agent && this.sessionId) {
+            // Now the conversation is real and safe to resume next time.
             agent.lastSessionId = this.sessionId;
             store.save();
           }
+
+          // The session advertises which slash commands it accepts. Commands
+          // tagged terminal-only are bound to a real TTY, so this UI hides
+          // them exactly as the SDK asks non-terminal hosts to.
+          const terminalOnly = new Set(message.terminal_slash_commands || []);
+          this.commands = (message.slash_commands || []).filter((c) => !terminalOnly.has(c));
+          bus.emitEvent('agent.commands', {
+            agentId: this.agentId,
+            commands: this.commands,
+          });
+
           this.setStatus(this.pendingTurns > 0 ? 'working' : 'idle');
         }
         break;
@@ -656,6 +669,7 @@ export function workerState(agentId) {
     startedAt: worker.startedAt,
     lastError: worker.lastError,
     todos: worker.todos,
+    commands: worker.commands,
   };
 }
 

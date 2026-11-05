@@ -271,6 +271,15 @@ async function handleEvent({ type, data }) {
       break;
     }
 
+    case 'agent.commands': {
+      if (state.snapshot?.workers?.[data.agentId]) {
+        state.snapshot.workers[data.agentId].commands = data.commands;
+      }
+      // Re-render so the order box learns what it can offer.
+      if (state.panel === 'agent' && state.selectedAgentId === data.agentId) renderPanel();
+      break;
+    }
+
     case 'agent.todos': {
       if (state.selectedAgentId === data.agentId) {
         state.todos = data.todos || [];
@@ -294,16 +303,33 @@ async function handleEvent({ type, data }) {
       break;
 
     case 'approval.new':
-    case 'approval.escalated':
-    case 'approval.decided': {
+    case 'approval.escalated': {
       await reloadApprovals();
-      if (type !== 'approval.decided' && data.route === 'lord') {
+      // Put it in front of whoever is watching this agent, wherever they are
+      // watching from. Without this a question raised while the panel was
+      // already open never appeared in the agent's own chat.
+      showApprovalInFeeds(data);
+      if (data.route === 'lord') {
         toast({
-          title: `${data.agentName} awaits your word`,
+          title:
+            data.kind === 'question'
+              ? `${data.agentName} asks you a question`
+              : `${data.agentName} awaits your word`,
           body: data.title,
           kind: 'approval',
           timeout: 12000,
         });
+      }
+      break;
+    }
+
+    case 'approval.decided': {
+      await reloadApprovals();
+      // Swap the live card for the outcome, rather than leaving a dead form.
+      for (const card of document.querySelectorAll(
+        `[data-approval="${CSS.escape(data.id)}"]`
+      )) {
+        card.replaceWith(approvalOutcomeNode(data));
       }
       break;
     }
@@ -587,8 +613,55 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     }
   };
 
+  // Slash commands the live session advertises. Typing "/" offers them.
+  const commands = state.snapshot?.workers?.[agent.id]?.commands || [];
+  const palette = h('div.cmd-palette', { hidden: true });
+
+  const closePalette = () => {
+    palette.hidden = true;
+    palette.replaceChildren();
+  };
+
+  const showPalette = () => {
+    const value = input.value;
+    // Only while the whole box is a single word starting with a slash.
+    const match = /^\/(\w*)$/.exec(value.trim());
+    if (!match || !commands.length) return closePalette();
+
+    const matches = commands
+      .filter((c) => c.toLowerCase().startsWith(match[1].toLowerCase()))
+      .slice(0, 12);
+    if (!matches.length) return closePalette();
+
+    palette.replaceChildren(
+      ...matches.map((c) =>
+        h('button.cmd-item', {
+          text: `/${c}`,
+          onclick: () => {
+            input.value = `/${c} `;
+            closePalette();
+            input.focus();
+          },
+        })
+      )
+    );
+    palette.hidden = false;
+  };
+
+  input.addEventListener('input', showPalette);
+  input.addEventListener('blur', () => setTimeout(closePalette, 150));
+
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send();
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      closePalette();
+      send();
+    } else if (e.key === 'Tab' && !palette.hidden) {
+      // Tab completes to the first match, like a shell.
+      e.preventDefault();
+      palette.querySelector('.cmd-item')?.click();
+    } else if (e.key === 'Escape') {
+      closePalette();
+    }
   });
 
   const waiting = (state.snapshot?.approvals || []).filter(
@@ -620,11 +693,14 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   const console_ = h('div.console', {}, [
     scroller,
     h('div.order-box', {}, [
+      palette,
       input,
       h('div.actions', {}, [
         h('button.btn.btn-gold.btn-sm', { text: 'Issue order', onclick: send }),
         h('span.spacer'),
-        h('span.card-sub', { text: 'Ctrl+Enter' }),
+        h('span.card-sub', {
+          text: commands.length ? `Ctrl+Enter · / for ${commands.length} commands` : 'Ctrl+Enter',
+        }),
       ]),
     ]),
   ]);
@@ -822,6 +898,45 @@ function activityNode(entry) {
       entry.subagent && h('span', { text: '· subagent' }),
     ]),
     body,
+  ]);
+}
+
+/**
+ * Drop an approval or question into every open feed for that agent, so it
+ * appears inline in the conversation where it was raised.
+ */
+function showApprovalInFeeds(approval) {
+  if (!approval?.agentId) return;
+
+  for (const scroller of document.querySelectorAll(
+    `[data-feed-agent="${CSS.escape(approval.agentId)}"]`
+  )) {
+    const feed = scroller.querySelector('.feed');
+    if (!feed) continue;
+    if (feed.querySelector(`[data-approval="${CSS.escape(approval.id)}"]`)) continue;
+
+    const atBottom =
+      scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 80;
+    feed.append(approvalCard(approval));
+    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
+}
+
+/** What a question or request looks like once it has been settled. */
+function approvalOutcomeNode(approval) {
+  const answered = approval.decision === 'answered';
+  const text = answered
+    ? `You answered: ${approval.note}`
+    : `${approval.decision === 'approved' ? 'Sanctioned' : 'Refused'}` +
+      `${approval.decidedBy === 'ceo' ? ' by the CEO' : ''}` +
+      `${approval.note ? ` — ${approval.note}` : ''}`;
+
+  return h(`div.act.act-approval`, { 'data-approval': approval.id }, [
+    h('div.act-meta', {}, [
+      h('span', { text: timeOf(approval.decidedAt || Date.now()) }),
+      h('span', { text: answered ? 'ANSWERED' : 'DECIDED' }),
+    ]),
+    h('div.act-plain', { text: `${approval.title}\n${text}` }),
   ]);
 }
 
@@ -1419,12 +1534,13 @@ function questionCard(approval) {
 
   const options = Array.isArray(approval.options) ? approval.options : [];
 
-  return h('div.card.question', {}, [
+  return h('div.card.question', { 'data-approval': approval.id }, [
     h('div.card-head', {}, [
       h('div', { style: { flex: '1', minWidth: '0' } }, [
         h('div.card-title', { text: approval.title, style: { fontSize: '12px' } }),
-        h('div.card-sub', { text: `${approval.agentName} awaits your answer` }),
+        h('div.card-sub', { text: `${approval.agentName} asks you` }),
       ]),
+      openChatButton(approval),
       h('span.pill', { text: timeOf(approval.createdAt) }),
     ]),
 
@@ -1456,6 +1572,24 @@ function questionCard(approval) {
   ]);
 }
 
+/**
+ * Jump from a request in HQ straight to the agent who raised it. Hidden when
+ * you are already looking at that agent.
+ */
+function openChatButton(approval) {
+  if (state.panel === 'agent' && state.selectedAgentId === approval.agentId) return null;
+
+  return h('button.btn.btn-sm', {
+    text: '→ Open chat',
+    title: `Open ${approval.agentName}'s console`,
+    onclick: (e) => {
+      e.stopPropagation();
+      openAgent(approval.agentId);
+      map.focusAgent(approval.agentId);
+    },
+  });
+}
+
 function approvalCard(approval, { compact = false } = {}) {
   if (approval.kind === 'question') return questionCard(approval);
   const note = h('input', { type: 'text', placeholder: 'A remark, if you wish…' });
@@ -1473,7 +1607,7 @@ function approvalCard(approval, { compact = false } = {}) {
     }
   };
 
-  return h('div.card.approval', { 'data-route': approval.route }, [
+  return h('div.card.approval', { 'data-route': approval.route, 'data-approval': approval.id }, [
     h('div.card-head', {}, [
       h('div', { style: { flex: '1', minWidth: '0' } }, [
         h('div.card-title', { text: approval.title, style: { fontSize: '12px' } }),
@@ -1484,6 +1618,7 @@ function approvalCard(approval, { compact = false } = {}) {
             `${approval.escalated ? ' · escalated' : ''}`,
         }),
       ]),
+      openChatButton(approval),
       h('span.pill', { text: approval.severity === 'grave' ? 'GRAVE' : timeOf(approval.createdAt) }),
     ]),
 

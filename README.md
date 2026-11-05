@@ -70,6 +70,15 @@ Each agent has four tabs, and the first two are deliberately different things:
 - **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
 - **Memory** — their private memory file, editable.
 
+### Slash commands
+
+Type `/` in the order box and the session's own commands are offered — `/compact`,
+`/context`, `/model`, `/usage`, your installed skills, plugin commands. The list is
+read from what the live session advertises in its `system/init` message (76 of them
+on a typical setup), so it is always what that agent actually accepts rather than a
+hard-coded guess. Commands the SDK flags as terminal-only are hidden, since they are
+bound to a real TTY.
+
 **Pop out** opens a floating console on the map. Drag it by its title bar, resize it
 from any corner, and open as many as you like — the right-hand panel only ever shows
 one agent, so this is how you watch several at once. The panel itself can be dragged
@@ -131,8 +140,10 @@ Every agent gets an in-process MCP server, `mcp__office__*`:
 | `report_progress` | record a milestone — this is what fills the Activity tab |
 | `petition_lord` | send word directly to you |
 
-When an agent calls `ask_lord`, HQ shows the question with its options as buttons —
-clicking one sends it straight back as the tool's result and the agent carries on.
+When an agent calls `ask_lord`, the question appears **inline in that agent's own
+console**, with its options as buttons — clicking one sends it straight back as the
+tool's result and the agent carries on. The same question also appears in HQ, where
+each pending item has an **→ Open chat** button that takes you to the agent.
 Claude Code's own `AskUserQuestion` cannot be answered from a hook (there is no way to
 hand a tool its result), so the office intercepts it and routes it through the same
 queue, telling the agent to use `ask_lord` next time.
