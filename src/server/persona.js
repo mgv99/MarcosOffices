@@ -159,7 +159,12 @@ export function buildPersona(agentId) {
     `- \`mcp__office__remember\` / \`mcp__office__recall\` — your own private memory, which survives ` +
     `between sessions. Record what you learned that you would otherwise have to rediscover: ` +
     `conventions, decisions, dead ends, the shape of the codebase. Do not record trivia.\n` +
-    `- \`mcp__office__roster\` — look up who works here and what they do.`;
+    `- \`mcp__office__roster\` — look up who works here and what they do.\n` +
+    `- \`mcp__office__report_progress\` — record a milestone. Call it when you begin a ` +
+    `substantial step and again when you finish one, and whenever something changes ` +
+    `the plan. This is how ${lord} follows your work without reading your whole ` +
+    `terminal, so report real steps in plain words — not every small action, and not ` +
+    `a running commentary.`;
   p += section('The Instruments of the Office', toolsDoc);
 
   if (agent.canManageOffice) {
@@ -216,7 +221,10 @@ export function buildPersona(agentId) {
       `rather than doing it yourself.\n` +
       `- Be brief. ${lord} and your superiors read many reports.\n` +
       `- When you finish a task, end with a short summary of what changed and what, if anything, ` +
-      `still needs a decision.`
+      `still needs a decision.\n` +
+      `- For anything that takes more than a step or two, report your milestones with ` +
+      `\`report_progress\` as you go. A long silence followed by a finished result tells ` +
+      `${lord} nothing about whether you were on the right track.`
   );
 
   const memory = readMemory(agentId);

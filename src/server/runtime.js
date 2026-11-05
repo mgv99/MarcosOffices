@@ -11,12 +11,16 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 
 import { store, newId, emptyStats, LOGS_DIR } from './store.js';
 import { bus } from './bus.js';
 import { buildPersona } from './persona.js';
-import { buildOfficeServer, setMessageDeliverer } from './office-tools.js';
+import {
+  buildOfficeServer,
+  setMessageDeliverer,
+  setMilestoneRecorder,
+} from './office-tools.js';
 import { buildHqServer } from './hq-tools.js';
 import {
   requestApproval,
@@ -78,6 +82,9 @@ export class AgentWorker {
     this.startedAt = null;
     this.lastError = null;
     this.stopping = false;
+    this.todos = [];
+    // Guards against looping if a fresh session also fails to start.
+    this._resumeRetried = false;
     this._logStream = null;
   }
 
@@ -123,6 +130,38 @@ export class AgentWorker {
   }
 
   /**
+   * Remember the agent's current plan, and announce the steps that changed.
+   *
+   * Claude Code keeps a running task list; treating a step moving to
+   * "in_progress" or "completed" as a milestone gives the Activity view
+   * something meaningful to show instead of raw tool traffic.
+   */
+  recordTodos(input) {
+    const todos = Array.isArray(input?.todos) ? input.todos : [];
+    if (!todos.length) return;
+
+    const before = new Map(this.todos.map((t) => [t.content, t.status]));
+
+    for (const todo of todos) {
+      const was = before.get(todo.content);
+      if (was === todo.status) continue;
+
+      if (todo.status === 'in_progress') {
+        this.log('milestone', todo.activeForm || todo.content, { step: 'started' });
+      } else if (todo.status === 'completed') {
+        this.log('milestone', todo.content, { step: 'done' });
+      }
+    }
+
+    this.todos = todos.map((t) => ({
+      content: t.content,
+      status: t.status,
+      activeForm: t.activeForm || null,
+    }));
+    bus.emitEvent('agent.todos', { agentId: this.agentId, todos: this.todos });
+  }
+
+  /**
    * Keep the agent's ledger. This is what lets the office answer "who is
    * costing me money" without anyone having to guess.
    */
@@ -161,7 +200,36 @@ export class AgentWorker {
     return os.homedir();
   }
 
-  buildOptions() {
+  /**
+   * Decide whether the agent's previous conversation can actually be resumed.
+   *
+   * A session that was called to duty and sent home without ever taking a turn
+   * is never written to disk, so resuming it fails with "No conversation found
+   * with session ID". Check before asking rather than collapsing afterwards.
+   */
+  async resolveResume() {
+    const agent = this.agent;
+    const previous = agent?.lastSessionId;
+    if (!previous || agent.resumeLastSession === false) return null;
+
+    try {
+      const messages = await getSessionMessages(previous, { limit: 1 });
+      if (Array.isArray(messages) && messages.length) return previous;
+    } catch {
+      /* unreadable means unresumable */
+    }
+
+    this.log(
+      'system',
+      'Their previous conversation could not be found, so they begin a fresh one. ' +
+        'Their memory and standing orders are unaffected.'
+    );
+    agent.lastSessionId = null;
+    store.save();
+    return null;
+  }
+
+  buildOptions(resumeId = null) {
     const agent = this.agent;
     const cwd = this.resolveCwd();
 
@@ -214,15 +282,18 @@ export class AgentWorker {
     // The SDK only emits that after the first turn, which left newly hired
     // staff briefly unidentifiable — and so listed a second time in the lobby
     // as visiting sessions.
-    if (agent.lastSessionId && agent.resumeLastSession !== false) {
-      options.resume = agent.lastSessionId;
-      this.sessionId = agent.lastSessionId;
+    //
+    // `lastSessionId` is deliberately NOT written here: a session that never
+    // takes a turn is never persisted by Claude Code, and recording its id
+    // would make the next call to duty try to resume a conversation that does
+    // not exist. It is saved once the session is real, on `init`.
+    if (resumeId) {
+      options.resume = resumeId;
+      this.sessionId = resumeId;
     } else {
       const fresh = randomUUID();
       options.sessionId = fresh;
       this.sessionId = fresh;
-      agent.lastSessionId = fresh;
-      store.save();
     }
 
     return options;
@@ -320,7 +391,8 @@ export class AgentWorker {
     this.lastError = null;
 
     try {
-      this.session = query({ prompt: this.queue, options: this.buildOptions() });
+      const resumeId = await this.resolveResume();
+      this.session = query({ prompt: this.queue, options: this.buildOptions(resumeId) });
     } catch (err) {
       this.setStatus('error');
       this.lastError = err.message;
@@ -349,6 +421,25 @@ export class AgentWorker {
       }
     } catch (err) {
       if (!this.stopping) {
+        // A conversation can disappear between the pre-flight check and the
+        // resume (cleaned up, or never persisted). Start them fresh rather
+        // than leaving them collapsed on the floor.
+        if (isMissingSessionError(err) && !this._resumeRetried) {
+          this._resumeRetried = true;
+          const agent = this.agent;
+          if (agent) {
+            agent.lastSessionId = null;
+            store.save();
+          }
+          this.log(
+            'system',
+            'Their previous conversation was gone, so they report again with a fresh one.'
+          );
+          this.session = null;
+          this.start().catch((e) => this.log('error', `Could not restart: ${e.message}`));
+          return;
+        }
+
         this.lastError = err.message;
         this.log('error', `Session failed: ${err.message}`);
         this.setStatus('error');
@@ -388,11 +479,34 @@ export class AgentWorker {
           } else if (block.type === 'thinking' && block.thinking?.trim()) {
             this.log('thinking', block.thinking, { subagent: message.agent_id || null });
           } else if (block.type === 'tool_use') {
+            // The agent's own task list is the clearest statement of what it
+            // is working on, so it drives the milestone view.
+            if (block.name === 'TodoWrite') this.recordTodos(block.input);
+
             this.log('tool', summariseToolCall(block.name, block.input), {
               toolName: block.name,
+              toolUseId: block.id,
+              toolInput: truncateInput(block.input),
               subagent: message.agent_id || null,
             });
           }
+        }
+        break;
+      }
+
+      // Tool output comes back as a user-role message. Without it the Orders
+      // tab shows the agent's commands but never what they produced.
+      case 'user': {
+        const content = message.message?.content;
+        if (!Array.isArray(content)) break;
+
+        for (const block of content) {
+          if (block.type !== 'tool_result') continue;
+          this.log('tool_result', toolResultText(block.content), {
+            toolUseId: block.tool_use_id,
+            isError: !!block.is_error,
+            subagent: message.agent_id || null,
+          });
         }
         break;
       }
@@ -459,6 +573,7 @@ export class AgentWorker {
     } catch {}
     this.session = null;
     this.pendingTurns = 0;
+    this._resumeRetried = false;
     this._logStream?.end();
     this._logStream = null;
     this.log('system', 'Left their post.');
@@ -489,6 +604,7 @@ export function workerState(agentId) {
     pendingTurns: worker.pendingTurns,
     startedAt: worker.startedAt,
     lastError: worker.lastError,
+    todos: worker.todos,
   };
 }
 
@@ -569,6 +685,24 @@ export async function order(agentId, text) {
 export async function stopAll() {
   await Promise.all([...workers.values()].map((w) => w.stop().catch(() => {})));
 }
+
+/** Record a milestone an agent reported through `report_progress`. */
+setMilestoneRecorder((agentId, { step, state, detail }) => {
+  const worker = workers.get(agentId);
+  if (!worker) return;
+
+  worker.log('milestone', detail ? `${step} — ${detail}` : step, { step: state });
+
+  // Keep a running plan so the Activity tab can show where they are.
+  const existing = worker.todos.find((t) => t.content === step);
+  const status =
+    state === 'done' ? 'completed' : state === 'blocked' ? 'blocked' : 'in_progress';
+
+  if (existing) existing.status = status;
+  else worker.todos.push({ content: step, status, activeForm: null });
+
+  bus.emitEvent('agent.todos', { agentId, todos: worker.todos });
+});
 
 /**
  * Is this session one of ours?
@@ -698,6 +832,11 @@ function isBenignNoise(line) {
   return BENIGN_STDERR.some((pattern) => pattern.test(line));
 }
 
+/** The conversation we tried to resume is not on disk. */
+function isMissingSessionError(err) {
+  return /no conversation found with session id/i.test(String(err?.message || ''));
+}
+
 /**
  * Tools that only affect the agent's own context and reach nothing outside the
  * session. Asking Lord Marcos to sanction these spends his attention for
@@ -756,6 +895,35 @@ function summariseToolCall(name, input = {}) {
       return truncate(first || name, 160);
     }
   }
+}
+
+/** Flatten a tool_result's content into displayable text. */
+function toolResultText(content) {
+  if (typeof content === 'string') return content.slice(0, 6000);
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => (b?.type === 'text' ? b.text : b?.type ? `[${b.type}]` : ''))
+      .join('\n')
+      .slice(0, 6000);
+  }
+  return content == null ? '' : String(content).slice(0, 6000);
+}
+
+/**
+ * Keep a tool's arguments viewable without writing a whole file into the log:
+ * long string values are clipped, everything else is passed through.
+ */
+function truncateInput(input) {
+  if (!input || typeof input !== 'object') return input;
+
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    out[key] =
+      typeof value === 'string' && value.length > 2000
+        ? value.slice(0, 2000) + `\n… (${value.length - 2000} more characters)`
+        : value;
+  }
+  return out;
 }
 
 function truncate(text, n) {

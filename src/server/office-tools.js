@@ -20,6 +20,19 @@ export function setMessageDeliverer(fn) {
   messageDeliverer = fn;
 }
 
+/**
+ * Late-bound hook into the runtime, so a milestone an agent reports lands in
+ * its activity record alongside everything else.
+ */
+let milestoneRecorder = null;
+export function setMilestoneRecorder(fn) {
+  milestoneRecorder = fn;
+}
+
+function recordMilestone(agentId, milestone) {
+  milestoneRecorder?.(agentId, milestone);
+}
+
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 
 /** Find a colleague by id, exact name, or case-insensitive name. */
@@ -247,6 +260,28 @@ export function buildOfficeServer(agentId) {
             return `${d.name}\n${staff.join('\n') || '  (no staff assigned)'}`;
           });
           return text(lines.join('\n\n'));
+        }
+      ),
+
+      tool(
+        'report_progress',
+        'Record a milestone in your work so Lord Marcos can follow it without reading ' +
+          'your whole terminal. Call it when you START a substantial step and again ' +
+          'when you FINISH one, and when you hit something that changes the plan. ' +
+          'Report real steps, not every small action.',
+        {
+          step: z.string().describe('The step, in a few words, e.g. "Rewriting the parser".'),
+          state: z
+            .enum(['started', 'done', 'blocked'])
+            .describe('Whether you are beginning this step, have finished it, or are stuck.'),
+          detail: z
+            .string()
+            .optional()
+            .describe('One sentence of substance: what you found, changed, or need.'),
+        },
+        async ({ step, state, detail }) => {
+          recordMilestone(agentId, { step, state, detail });
+          return text('Noted.');
         }
       ),
 

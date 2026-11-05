@@ -396,27 +396,74 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
 .win-grip-ne::after { right: 3px; top: 3px; border-right-width: 2px; border-top-width: 2px; }
 .win-grip-nw::after { left: 3px; top: 3px; border-left-width: 2px; border-top-width: 2px; }
 
-/* --- the chat view (Orders tab) ------------------------------------------- */
+/* --- the terminal (Orders tab) -------------------------------------------- */
 
-.feed-chat { display: flex; flex-direction: column; gap: 12px; }
+.terminal { background: #0a0c12; padding: 10px 12px; }
+.feed-term { display: flex; flex-direction: column; gap: 6px; font-size: 12px; line-height: 1.55; }
 
-.chat-turn { display: flex; flex-direction: column; max-width: 92%; }
-.chat-lord { align-self: flex-end; align-items: flex-end; }
-.chat-agent { align-self: flex-start; align-items: flex-start; }
+.term-line { display: flex; gap: 8px; align-items: flex-start; word-break: break-word; }
+.term-line > .md { flex: 1; min-width: 0; }
 
-.chat-who { font-size: 10px; color: var(--dim); margin-bottom: 3px; padding: 0 2px; }
-
-.chat-bubble {
-  padding: 8px 11px;
-  border: 2px solid var(--line);
-  background: var(--panel-2);
-  font-size: 12px;
+.term-order {
+  color: var(--gold);
+  padding: 6px 8px;
+  background: #1a1710;
+  border-left: 3px solid var(--gold);
+  white-space: pre-wrap;
+  margin-top: 6px;
 }
-.chat-lord .chat-bubble {
-  background: #241f12;
-  border-color: var(--gold);
+.term-caret { color: var(--gold); font-weight: 700; flex: none; }
+
+.term-bullet { color: var(--green); flex: none; }
+.term-say .term-bullet { color: var(--blue); }
+
+.term-toolname { color: var(--green); font-weight: 700; flex: none; }
+.term-toolarg { color: var(--muted); min-width: 0; word-break: break-all; }
+
+.term-result { display: flex; gap: 8px; padding-left: 8px; }
+.term-pipe { color: var(--dim); flex: none; }
+
+.term-pre {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-size: 11px;
+  max-height: 320px;
+  overflow: auto;
 }
-.chat-agent .chat-bubble { border-left: 3px solid var(--blue); }
+
+.term-done { color: var(--green); }
+.term-err { color: var(--red); }
+.term-err .term-pre { color: #e9b4b0; }
+.term-sys { color: var(--dim); }
+
+.term-fold { margin-left: 8px; }
+.term-fold > summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 11px;
+  padding: 2px 0;
+  list-style: none;
+}
+.term-fold > summary::before { content: '▸ '; }
+.term-fold[open] > summary::before { content: '▾ '; }
+.term-fold > summary:hover { color: var(--text); }
+.term-thinking > summary { color: var(--violet); opacity: .8; }
+
+/* --- milestones (Activity tab) -------------------------------------------- */
+
+.todo-list { display: flex; flex-direction: column; gap: 4px; }
+.todo { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; }
+.todo-mark { flex: none; width: 12px; }
+.todo-completed { color: var(--dim); text-decoration: line-through; }
+.todo-completed .todo-mark { color: var(--green); text-decoration: none; }
+.todo-in_progress { color: var(--gold); font-weight: 700; }
+.todo-pending { color: var(--muted); }
+
+.act-milestone { border-left-color: var(--violet); }
 
 /* --- project row ---------------------------------------------------------- */
 

@@ -305,7 +305,7 @@ route('POST', /^\/api\/agents\/([\w]+)\/interrupt$/, async (req, res, [id]) => {
 });
 
 route('GET', /^\/api\/agents\/([\w]+)\/activity$/, async (req, res, [id]) =>
-  ok(res, { activity: activityFor(id, 300) })
+  ok(res, { activity: activityFor(id, 400), todos: workerState(id).todos || [] })
 );
 
 route('GET', /^\/api\/agents\/([\w]+)\/memory$/, async (req, res, [id]) => {

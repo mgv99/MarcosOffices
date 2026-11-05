@@ -69,6 +69,7 @@ const state = {
   panel: null, // 'agent' | 'hq' | 'staff' | ...
   agentTab: 'orders',
   activity: [], // for the open agent
+  todos: [], // their current task list
 };
 
 let map = null;
@@ -270,6 +271,14 @@ async function handleEvent({ type, data }) {
       break;
     }
 
+    case 'agent.todos': {
+      if (state.selectedAgentId === data.agentId) {
+        state.todos = data.todos || [];
+        if (state.panel === 'agent' && state.agentTab === 'activity') renderPanel();
+      }
+      break;
+    }
+
     case 'agent.stats': {
       const agent = agentById(data.agentId);
       if (agent) agent.stats = data.stats;
@@ -366,11 +375,13 @@ async function openAgent(id) {
   openPanel('agent');
 
   try {
-    const { activity } = await api.activity(id);
+    const { activity, todos } = await api.activity(id);
     state.activity = activity;
+    state.todos = todos || [];
     if (state.panel === 'agent' && state.selectedAgentId === id) renderPanel();
   } catch {
     state.activity = [];
+    state.todos = [];
   }
 }
 
@@ -588,8 +599,8 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   // them at once — side panel and floating windows alike. `data-feed-filter`
   // tells appendActivity which entries this particular view wants.
   const scroller = h(
-    'div.feed-scroll',
-    { 'data-feed-agent': agent.id, 'data-feed-filter': 'chat' },
+    'div.feed-scroll.terminal',
+    { 'data-feed-agent': agent.id, 'data-feed-filter': 'terminal' },
     [
       showNote &&
         h('div.lord-note', {
@@ -598,7 +609,11 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
             'The Lord Almighty, He Who Is Everywhere and Rules Over All.',
         }),
       ...(waiting.length ? waiting.map((a) => approvalCard(a, { compact: true })) : []),
-      h('div.feed.feed-chat', {}, (activity || []).filter(isChat).slice(-250).map(chatNode)),
+      h(
+        'div.feed.feed-term',
+        {},
+        (activity || []).filter(isTerminal).slice(-400).map(terminalNode)
+      ),
     ]
   );
 
@@ -626,38 +641,127 @@ function renderOrders(container, agent) {
   container.replaceChildren(buildAgentConsole(agent, { activity: state.activity }));
 }
 
+/** The milestone view: the plan, and the notable things that happened. */
 function renderActivity(container) {
-  const entries = state.activity.filter(isOperational);
+  const entries = state.activity.filter(isMilestone);
+  const todos = state.todos || [];
 
   container.replaceChildren(
     h('div.hint', {
       text:
-        'What they did, rather than what they said: tools used, leave requested, ' +
-        'and how each task ended. The conversation itself is under Orders.',
+        'The steps they set themselves and how the work is going. The full terminal ' +
+        'is under Orders.',
       style: { marginBottom: '10px' },
     }),
+
+    todos.length
+      ? h('div.card', {}, [
+          h('div.card-title', { text: 'Current plan', style: { marginBottom: '8px' } }),
+          h(
+            'div.todo-list',
+            {},
+            todos.map((t) =>
+              h(`div.todo.todo-${t.status}`, {}, [
+                h('span.todo-mark', {
+                  text: t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○',
+                }),
+                h('span', {
+                  text: t.status === 'in_progress' ? t.activeForm || t.content : t.content,
+                }),
+              ])
+            )
+          ),
+        ])
+      : null,
+
     entries.length
       ? h(
           'div.feed-scroll',
-          { 'data-feed-agent': state.selectedAgentId, 'data-feed-filter': 'ops' },
+          { 'data-feed-agent': state.selectedAgentId, 'data-feed-filter': 'milestone' },
           [h('div.feed', {}, entries.slice(-300).map(activityNode))]
         )
-      : h('div.empty', { text: 'Nothing done yet this session.' })
+      : h('div.empty', { text: 'No milestones recorded yet.' })
   );
 }
 
 /**
- * A conversation turn, rendered like a chat rather than a log line: your
- * orders on one side, their replies on the other.
+ * One line of the terminal, rendered the way the CLI renders it: the order you
+ * typed, their prose, the tools they ran and what came back.
  */
-function chatNode(entry) {
-  const mine = entry.kind === 'order';
-  return h(`div.chat-turn.chat-${mine ? 'lord' : 'agent'}`, {}, [
-    h('div.chat-who', {
-      text: mine ? `${state.snapshot?.office?.lordName || 'Lord Marcos'} · ${timeOf(entry.at)}` : timeOf(entry.at),
-    }),
-    h('div.chat-bubble', {}, [markdownNode(String(entry.text ?? '').slice(0, 20000))]),
-  ]);
+function terminalNode(entry) {
+  const text = String(entry.text ?? '');
+
+  switch (entry.kind) {
+    case 'order':
+      return h('div.term-line.term-order', {}, [
+        h('span.term-caret', { text: '>' }),
+        h('span', { text }),
+      ]);
+
+    case 'say':
+      return h('div.term-line.term-say', {}, [
+        h('span.term-bullet', { text: '⏺' }),
+        markdownNode(text.slice(0, 20000)),
+      ]);
+
+    case 'thinking':
+      return collapsible('✻ Thinking', markdownNode(text.slice(0, 20000)), 'term-thinking');
+
+    case 'tool': {
+      const head = h('div.term-line.term-tool', {}, [
+        h('span.term-bullet', { text: '⏺' }),
+        h('span.term-toolname', { text: entry.toolName || 'tool' }),
+        h('span.term-toolarg', { text: text ? `(${text})` : '' }),
+      ]);
+      if (!entry.toolInput) return head;
+      return h('div', {}, [
+        head,
+        collapsible('arguments', h('pre.term-pre', { text: safeStringify(entry.toolInput) }), 'term-args'),
+      ]);
+    }
+
+    case 'tool_result': {
+      const body = h('pre.term-pre', { text: text.slice(0, 4000) });
+      const label = entry.isError ? '⎿ failed' : '⎿ result';
+      // Short results are worth showing outright; long ones fold away.
+      return text.length > 400
+        ? collapsible(label, body, entry.isError ? 'term-err' : 'term-res')
+        : h(`div.term-result${entry.isError ? '.term-err' : ''}`, {}, [
+            h('span.term-pipe', { text: '⎿' }),
+            body,
+          ]);
+    }
+
+    case 'result':
+      return h('div.term-line.term-done', {
+        text:
+          `${entry.ok === false ? '✗' : '✓'} ${text}` +
+          (entry.turns ? ` · ${entry.turns} turns` : '') +
+          (entry.cost ? ` · ${money(entry.cost)}` : ''),
+      });
+
+    case 'error':
+    case 'stderr':
+      return h('div.term-line.term-err', { text: `✗ ${text.slice(0, 4000)}` });
+
+    default:
+      return h('div.term-line.term-sys', { text: `· ${text.slice(0, 2000)}` });
+  }
+}
+
+/** A fold-away block, closed by default. */
+function collapsible(label, body, className = '') {
+  const details = h(`details.term-fold.${className || 'term-fold-plain'}`);
+  details.append(h('summary', { text: label }), body);
+  return details;
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 /**
@@ -667,21 +771,27 @@ function chatNode(entry) {
  * else, as you would see it in the Claude CLI. ACTIVITY is the operational
  * log: what they actually did, what they asked leave for, and how it ended.
  */
-const CHAT_KINDS = new Set(['order', 'say']);
-const OPERATIONAL_KINDS = new Set([
-  'tool', 'approval', 'result', 'system', 'error', 'stderr', 'thinking',
+// The terminal shows everything the CLI would show you.
+const TERMINAL_KINDS = new Set([
+  'order', 'say', 'thinking', 'tool', 'tool_result', 'result', 'error', 'system', 'stderr',
 ]);
 
-const isChat = (entry) => CHAT_KINDS.has(entry.kind);
-const isOperational = (entry) => OPERATIONAL_KINDS.has(entry.kind);
+// Milestones are the agent's own account of the work: the steps it set itself,
+// what it asked leave for, and how each task ended.
+const MILESTONE_KINDS = new Set(['order', 'milestone', 'approval', 'result', 'error']);
+
+const isTerminal = (entry) => TERMINAL_KINDS.has(entry.kind);
+const isMilestone = (entry) => MILESTONE_KINDS.has(entry.kind);
 
 const ACTIVITY_LABELS = {
   order: 'ORDER FROM THE LORD',
   say: 'SAYS',
   thinking: 'THINKING',
   tool: null, // filled in from the tool name
+  tool_result: 'RESULT',
+  milestone: 'STEP',
   approval: 'APPROVAL',
-  result: 'COMPLETE',
+  result: 'TASK COMPLETE',
   error: 'ERROR',
   system: 'OFFICE',
   stderr: 'STDERR',
@@ -694,7 +804,11 @@ function activityNode(entry) {
   const label =
     entry.kind === 'tool'
       ? `USES ${entry.toolName || 'a tool'}`
-      : ACTIVITY_LABELS[entry.kind] || entry.kind.toUpperCase();
+      : entry.kind === 'milestone'
+        ? { done: '✓ FINISHED', blocked: '⚠ BLOCKED' }[entry.step] || '▸ STARTED'
+        : entry.kind === 'order'
+          ? 'TASK ASSIGNED'
+          : ACTIVITY_LABELS[entry.kind] || entry.kind.toUpperCase();
 
   const text = String(entry.text ?? '');
   const body = MARKDOWN_KINDS.has(entry.kind)
@@ -718,8 +832,8 @@ function appendActivity(entry) {
   for (const scroller of document.querySelectorAll(
     `[data-feed-agent="${CSS.escape(entry.agentId)}"]`
   )) {
-    const chat = scroller.dataset.feedFilter === 'chat';
-    if (chat ? !isChat(entry) : !isOperational(entry)) continue;
+    const terminal = scroller.dataset.feedFilter === 'terminal';
+    if (terminal ? !isTerminal(entry) : !isMilestone(entry)) continue;
 
     const feed = scroller.querySelector('.feed');
     if (!feed) continue;
@@ -727,7 +841,7 @@ function appendActivity(entry) {
     // Only follow the tail if the reader was already at the bottom.
     const atBottom =
       scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 80;
-    feed.append(chat ? chatNode(entry) : activityNode(entry));
+    feed.append(terminal ? terminalNode(entry) : activityNode(entry));
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 }

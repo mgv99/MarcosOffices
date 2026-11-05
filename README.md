@@ -62,9 +62,11 @@ staff looks like themselves permanently.
 
 Each agent has four tabs, and the first two are deliberately different things:
 
-- **Orders** — the conversation, and only the conversation: what you said and what
-  they said back, rendered as markdown, exactly as you would read it in the CLI.
-- **Activity** — what they *did*: tools used, leave requested, how each task ended.
+- **Orders** — the full terminal, as the CLI shows it: your orders, their prose, every
+  tool call with its arguments, and what each one returned. Long output and tool
+  arguments fold away; markdown is rendered.
+- **Activity** — the milestone view: their current plan, which steps are done, and the
+  notable events (leave requested, task finished, failures). No raw tool traffic.
 - **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
 - **Memory** — their private memory file, editable.
 
@@ -125,7 +127,13 @@ Every agent gets an in-process MCP server, `mcp__office__*`:
 | `request_approval` | submit a decision — **blocks** until a verdict comes back |
 | `remember` / `recall` | their private, persistent memory |
 | `roster` | who works here and what they do |
+| `report_progress` | record a milestone — this is what fills the Activity tab |
 | `petition_lord` | send word directly to you |
+
+Milestones come from `report_progress` rather than from Claude Code's own todo list:
+the Agent SDK does not expose `TodoWrite` to a session, so agents are instructed to
+report their own steps instead. The upside is that a milestone is a deliberate
+statement with substance, not a checkbox.
 
 ### The management instruments
 
