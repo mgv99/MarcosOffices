@@ -849,9 +849,22 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     text: state.drafts[agent.id] || '',
   });
 
+  /**
+   * Grow with the text so a long order is readable while it is written,
+   * stopping at a point where the box would start eating the conversation.
+   * The border is added back because scrollHeight covers content and padding
+   * only, while a border-box height must also carry the border.
+   */
+  const ORDER_BOX_MAX = 220;
+  const autoGrow = () => {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight + 4, ORDER_BOX_MAX)}px`;
+  };
+
   // Keep what is typed, so a re-render mid-sentence does not lose it.
   input.addEventListener('input', () => {
     state.drafts[agent.id] = input.value;
+    autoGrow();
   });
 
   const send = async () => {
@@ -859,6 +872,7 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     if (!text) return;
     input.value = '';
     delete state.drafts[agent.id];
+    autoGrow();
     try {
       await api.order(agent.id, text);
     } catch (err) {
@@ -866,6 +880,7 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
       // Give it back rather than swallowing what they wrote.
       state.drafts[agent.id] = text;
       input.value = text;
+      autoGrow();
     }
   };
 
@@ -895,7 +910,9 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
           text: `/${c}`,
           onclick: () => {
             input.value = `/${c} `;
+            state.drafts[agent.id] = input.value;
             closePalette();
+            autoGrow();
             input.focus();
           },
         })
@@ -970,9 +987,10 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     ]),
   ]);
 
-  // Start at the newest entry.
+  // Start at the newest entry, and size a restored draft to fit.
   requestAnimationFrame(() => {
     scroller.scrollTop = scroller.scrollHeight;
+    autoGrow();
   });
 
   return console_;

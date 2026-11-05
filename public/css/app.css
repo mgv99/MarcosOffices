@@ -346,7 +346,13 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
   min-width: 0;
   height: 42px;
   min-height: 42px;
+  /* Past this it scrolls, rather than crowding out the conversation. */
+  max-height: 220px;
   padding: 10px;
+  line-height: 1.45;
+  /* The box sizes itself to its content, so a drag handle would fight it. */
+  resize: none;
+  overflow-y: auto;
 }
 
 .order-send {
