@@ -845,7 +845,7 @@ function portrait(agent, w = 32, h = 48) {
 function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   const input = h('textarea', {
     placeholder: `Speak, and ${agent.name} obeys…`,
-    rows: 3,
+    rows: 1,
     text: state.drafts[agent.id] || '',
   });
 
