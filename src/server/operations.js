@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The office's business rules, in one place.
  *
  * Both the GUI (via the REST routes) and the managing agents (via the `hq` MCP
@@ -26,8 +26,14 @@ export function createsCycle(agentId, supervisorId) {
   return false;
 }
 
+/**
+ * Desk 0 is the head of department's: it sits alone at the front of the room.
+ * Ordinary staff fill the rows behind it.
+ */
+export const HEAD_SEAT = 0;
+
 /** The lowest unoccupied desk number in a department, or null if full. */
-export function findFreeSeat(departmentId, { excludeAgentId = null } = {}) {
+export function findFreeSeat(departmentId, { excludeAgentId = null, forHead = false } = {}) {
   const dept = store.department(departmentId);
   if (!dept) return null;
 
@@ -37,14 +43,80 @@ export function findFreeSeat(departmentId, { excludeAgentId = null } = {}) {
       .map((a) => a.seat)
   );
 
-  for (let seat = 0; seat < dept.seats; seat++) {
+  if (forHead) return taken.has(HEAD_SEAT) ? null : HEAD_SEAT;
+
+  // Everyone else starts at desk 1; the front desk is kept for the head.
+  for (let seat = 1; seat < dept.seats; seat++) {
     if (!taken.has(seat)) return seat;
   }
   return null;
 }
 
+/**
+ * Appoint a head of department.
+ *
+ * The head answers to the CEO, everyone else in the department answers to the
+ * head, and the head is moved to the desk at the front of the room.
+ */
+export function setDepartmentHead(departmentId, agentId) {
+  const dept = store.department(departmentId);
+  if (!dept) return { ok: false, error: 'no such department' };
+
+  const ceoId = store.state.office.ceoAgentId;
+
+  // Clearing the post: staff revert to answering the CEO directly.
+  if (!agentId) {
+    const previous = dept.headAgentId;
+    dept.headAgentId = null;
+    for (const a of store.state.agents) {
+      if (a.departmentId === departmentId && a.supervisorId === previous) {
+        a.supervisorId = ceoId;
+      }
+    }
+    store.save();
+    bus.emitEvent('department.updated', dept);
+    return { ok: true, department: dept };
+  }
+
+  const head = store.agent(agentId);
+  if (!head) return { ok: false, error: 'no such agent' };
+  if (head.departmentId !== departmentId) {
+    return { ok: false, error: `${head.name} does not serve in ${dept.name}` };
+  }
+
+  // Move the head to the front desk, swapping with whoever is sitting there.
+  const sitting = store.state.agents.find(
+    (a) => a.departmentId === departmentId && a.seat === HEAD_SEAT && a.id !== head.id
+  );
+  if (sitting) sitting.seat = head.seat;
+  head.seat = HEAD_SEAT;
+
+  dept.headAgentId = head.id;
+  // The CEO is nobody's subordinate, so the CEO heading a department keeps
+  // answering only to Lord Marcos.
+  head.supervisorId = head.isCeo ? null : ceoId;
+
+  for (const a of store.state.agents) {
+    if (a.departmentId === departmentId && a.id !== head.id && !a.isCeo) {
+      a.supervisorId = head.id;
+    }
+  }
+
+  store.save();
+  bus.emitEvent('department.updated', dept);
+  bus.emitEvent('agent.updated', head);
+  return { ok: true, department: dept, head };
+}
+
+/**
+ * Room size: wide enough for four desks abreast, and tall enough for the head
+ * of department's desk at the front plus two rows of four behind it.
+ */
+export const ROOM_W = 14;
+export const ROOM_H = 16;
+
 /** Find an unoccupied patch of floor for a new department. */
-export function placeDepartment({ x, y, w = 14, h = 10 } = {}) {
+export function placeDepartment({ x, y, w = ROOM_W, h = ROOM_H } = {}) {
   if (Number.isFinite(x) && Number.isFinite(y)) return { x, y, w, h };
   const gap = 2;
 
@@ -76,7 +148,8 @@ export function createDepartment(body = {}) {
     id: newId('dep_'),
     name: body.name.trim(),
     context: body.context || '',
-    seats: clamp(Number(body.seats) || 4, 1, 24),
+    // One head's desk at the front, plus two rows of four behind it.
+    seats: clamp(Number(body.seats) || 9, 1, 24),
     theme: body.theme || 'default',
     headAgentId: null,
     ...placeDepartment(body),
@@ -217,7 +290,7 @@ export function seedOffice() {
     {
       name: 'Operations',
       theme: 'creative',
-      seats: 4,
+      seats: 9,
       context:
         'Operations runs the company itself rather than its products. It keeps the ' +
         'roster, watches what each member of staff costs against what they deliver, ' +
@@ -228,13 +301,14 @@ export function seedOffice() {
           name: 'Prefect',
           title: 'Chief of Staff',
           canManageOffice: true,
+          head: true,
           model: 'sonnet',
           context:
             'You run the office on the CEO\'s behalf. You know who works here, what ' +
             'they are doing, and whether the shape of the company still fits the work. ' +
             'When Lord Marcos asks what is going on, you answer from the management ' +
             'instruments, not from memory. When a project needs a hand the office does ' +
-            'not have, you propose the hire — with a reason, not a hunch.',
+            'not have, you propose the hire â€” with a reason, not a hunch.',
           briefing:
             'Answer with facts drawn from the instruments. Name the number. Never pad.',
         },
@@ -245,7 +319,7 @@ export function seedOffice() {
           model: 'haiku',
           context:
             'You account for what this office spends. You watch the staff ledger and ' +
-            'report plainly when someone is consuming more than their work is worth — ' +
+            'report plainly when someone is consuming more than their work is worth â€” ' +
             'and equally plainly when a large bill was money well spent. You compare ' +
             'cost against delivery, never cost alone.',
         },
@@ -254,7 +328,7 @@ export function seedOffice() {
     {
       name: 'Engineering',
       theme: 'engineering',
-      seats: 6,
+      seats: 9,
       context:
         'Engineering builds and maintains Lord Marcos\'s software. It values working ' +
         'code over clever code, verifies before it claims, and reports failures as ' +
@@ -297,10 +371,10 @@ export function seedOffice() {
     {
       name: 'Research',
       theme: 'research',
-      seats: 4,
+      seats: 9,
       context:
         'Research investigates before the office commits. It reads documentation and ' +
-        'source rather than guessing, and it reports what it actually found — ' +
+        'source rather than guessing, and it reports what it actually found â€” ' +
         'including when the answer is "this will not work".',
       staff: [
         {
@@ -347,7 +421,7 @@ export function seedOffice() {
       created.departments.push(dept.name);
     }
 
-    let headId = dept.headAgentId;
+    let headName = null;
 
     for (const person of spec.staff) {
       const exists = store.state.agents.some(
@@ -364,17 +438,17 @@ export function seedOffice() {
         model: person.model || 'sonnet',
         effort: person.effort || 'medium',
         canManageOffice: !!person.canManageOffice,
-        // Department heads answer to the CEO; everyone else to their head.
-        supervisorId: person.head || !headId ? ceoId : headId,
+        supervisorId: ceoId,
       });
       if (!result.ok) continue;
 
       created.agents.push(result.agent.name);
-      if (person.head && !headId) {
-        headId = result.agent.id;
-        dept.headAgentId = headId;
-      }
+      if (person.head) headName = result.agent.id;
     }
+
+    // Appointing the head also seats them at the front and re-points the rest
+    // of the department's reporting line at them.
+    if (headName && !dept.headAgentId) setDepartmentHead(dept.id, headName);
 
     store.save();
   }

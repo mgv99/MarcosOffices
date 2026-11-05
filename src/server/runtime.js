@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 import { store, newId, emptyStats, LOGS_DIR } from './store.js';
@@ -23,6 +24,7 @@ import {
   notify,
   cancelPendingFor,
 } from './approvals.js';
+import { setOwnershipTest } from './discovery.js';
 
 const MAX_ACTIVITY_IN_MEMORY = 400;
 
@@ -208,8 +210,19 @@ export class AgentWorker {
     if (Array.isArray(agent.enabledSkills) && agent.enabledSkills.length) {
       options.skills = agent.enabledSkills;
     }
+    // Decide the session id now rather than waiting for the `init` message.
+    // The SDK only emits that after the first turn, which left newly hired
+    // staff briefly unidentifiable — and so listed a second time in the lobby
+    // as visiting sessions.
     if (agent.lastSessionId && agent.resumeLastSession !== false) {
       options.resume = agent.lastSessionId;
+      this.sessionId = agent.lastSessionId;
+    } else {
+      const fresh = randomUUID();
+      options.sessionId = fresh;
+      this.sessionId = fresh;
+      agent.lastSessionId = fresh;
+      store.save();
     }
 
     return options;
@@ -485,10 +498,53 @@ export function allWorkerStates() {
   return out;
 }
 
+/**
+ * An agent's record, newest last.
+ *
+ * Falls back to the on-disk log when nothing is in memory, so closing the
+ * office and reopening it does not appear to wipe everyone's history — the
+ * conversation itself survives in the Claude session either way.
+ */
 export function activityFor(agentId, limit = 200) {
   const worker = workers.get(agentId);
-  if (!worker) return [];
-  return worker.activity.slice(-limit);
+  if (worker?.activity.length) return worker.activity.slice(-limit);
+  return readActivityLog(agentId, limit);
+}
+
+/** Read the tail of an agent's activity log. */
+export function readActivityLog(agentId, limit = 200) {
+  const file = path.join(LOGS_DIR, `${agentId}.jsonl`);
+
+  let raw;
+  try {
+    const { size } = fs.statSync(file);
+    // Only ever read the tail; these logs grow without bound.
+    const window = 512 * 1024;
+    const start = Math.max(0, size - window);
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buffer = Buffer.alloc(size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      raw = buffer.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+
+  const entries = [];
+  for (const line of raw.split('\n').slice(-limit * 2)) {
+    if (!line.trim()) continue;
+    try {
+      // The read window can begin part-way through a line, and the last line
+      // can be half-written; both simply fail to parse and are skipped.
+      entries.push(JSON.parse(line));
+    } catch {
+      /* not a whole record */
+    }
+  }
+  return entries.slice(-limit);
 }
 
 export async function hireOn(agentId) {
@@ -513,6 +569,26 @@ export async function order(agentId, text) {
 export async function stopAll() {
   await Promise.all([...workers.values()].map((w) => w.stop().catch(() => {})));
 }
+
+/**
+ * Is this session one of ours?
+ *
+ * `claude agents --json` lists every live session on the machine, including
+ * the ones the office spawned itself. Without this the staff would appear a
+ * second time in the lobby as visitors.
+ */
+export function isOfficeSession(session) {
+  const id = session?.sessionId;
+  if (!id) return false;
+
+  for (const worker of workers.values()) {
+    if (worker.sessionId === id) return true;
+  }
+  // Also covers a session that is between turns, or one we are resuming.
+  return store.state.agents.some((a) => a.lastSessionId === id);
+}
+
+setOwnershipTest(isOfficeSession);
 
 /**
  * Deliver a colleague's message into a live session, so staff who are on duty

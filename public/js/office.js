@@ -24,14 +24,26 @@ import {
   STATUS_COLORS,
 } from './sprites.js';
 
-const ZOOM_LEVELS = [2, 3, 4, 5, 6];
+// Zoom 1 is the whole-office overview; rooms are tall enough now that a
+// multi-row floor plan does not fit at 2x.
+const ZOOM_LEVELS = [1, 2, 3, 4, 5, 6];
+
+/** Desk 0 is the head of department's, at the front of the room. */
+const HEAD_SEAT = 0;
+const DESKS_PER_ROW = 4;
+/** Tiles between the head's desk and the first row of staff. */
+const HEAD_GAP = 4;
 
 export class OfficeMap {
-  constructor(canvas, { onSelectAgent, onSelectDepartment, onBackground } = {}) {
+  constructor(
+    canvas,
+    { onSelectAgent, onSelectDepartment, onSelectVisitor, onBackground } = {}
+  ) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.onSelectAgent = onSelectAgent || (() => {});
     this.onSelectDepartment = onSelectDepartment || (() => {});
+    this.onSelectVisitor = onSelectVisitor || (() => {});
     this.onBackground = onBackground || (() => {});
 
     this.state = null;
@@ -51,6 +63,10 @@ export class OfficeMap {
 
   get zoom() {
     return ZOOM_LEVELS[this.camera.zoomIndex];
+  }
+
+  get maxZoomIndex() {
+    return ZOOM_LEVELS.length - 1;
   }
 
   setState(state) {
@@ -79,19 +95,39 @@ export class OfficeMap {
     };
   }
 
-  /** Where a department's desks sit, in world pixels. */
+  /**
+   * Where a department's desks sit, in world pixels.
+   *
+   * Desk 0 belongs to the head of department: it stands alone and centred at
+   * the front of the room, with a clear gap behind it. The rest of the staff
+   * fill rows of four facing forward.
+   */
   deskPosition(dept, seat) {
     const interiorX = dept.x + 1;
     const interiorY = dept.y + 2;
     const interiorW = Math.max(2, dept.w - 2);
 
-    const cols = Math.max(1, Math.floor(interiorW / 3));
-    const col = seat % cols;
-    const row = Math.floor(seat / cols);
+    const cols = Math.max(1, Math.min(DESKS_PER_ROW, Math.floor(interiorW / 3)));
+    const headRow = interiorY + 1;
+
+    if (seat === HEAD_SEAT) {
+      // Centre the two-tile desk across the room's interior.
+      const centre = interiorX + Math.max(0, Math.floor((interiorW - 2) / 2));
+      return { x: centre * TILE, y: headRow * TILE };
+    }
+
+    const index = seat - 1;
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+
+    // Indent the block of ordinary desks so it sits centred under the head.
+    const blockWidth = cols * 3 - 1;
+    const indent = Math.max(0, Math.floor((interiorW - blockWidth) / 2));
 
     return {
-      x: (interiorX + col * 3) * TILE,
-      y: (interiorY + 1 + row * 3) * TILE,
+      x: (interiorX + indent + col * 3) * TILE,
+      // HEAD_GAP leaves the head of department visibly apart from the ranks.
+      y: (headRow + HEAD_GAP + row * 3) * TILE,
     };
   }
 
@@ -250,7 +286,9 @@ export class OfficeMap {
       }), x + 8, y - 18);
     }
 
-    ctx.drawImage(deskSprite({ lit: busy, ceo: !!agent?.isCeo }), x, y - 6);
+    // The front desk gets the executive finish, occupied or not.
+    const grand = !!agent?.isCeo || seat === HEAD_SEAT;
+    ctx.drawImage(deskSprite({ lit: busy, ceo: grand }), x, y - 6);
 
     if (agent) {
       if (this.selectedAgentId === agent.id) {
@@ -350,9 +388,10 @@ export class OfficeMap {
       ctx.fillText(label, p.x, p.y);
     }
 
-    // Name tags under each member of staff
+    // Name tags under each member of staff. At the overview zoom they would
+    // collide into an unreadable smear, so the room plates carry the office.
     ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
-    for (const dept of this.state.departments) {
+    for (const dept of zoom < 2 ? [] : this.state.departments) {
       for (const agent of this.state.agents.filter((a) => a.departmentId === dept.id)) {
         const desk = this.deskPosition(dept, agent.seat);
         const p = toScreen(desk.x + TILE, desk.y + TILE + 8);
@@ -423,10 +462,11 @@ export class OfficeMap {
 
       const world = this.screenToWorld(e.clientX, e.clientY);
       const hit = this._hitTest(world.x, world.y);
-      const agentId = hit?.kind === 'agent' ? hit.id : null;
-      if (agentId !== this.hoverAgentId) {
-        this.hoverAgentId = agentId;
-        canvas.style.cursor = agentId ? 'pointer' : 'grab';
+      const clickable =
+        hit?.kind === 'agent' || hit?.kind === 'visitor' ? hit.id : null;
+      if (clickable !== this.hoverAgentId) {
+        this.hoverAgentId = clickable;
+        canvas.style.cursor = clickable ? 'pointer' : 'grab';
       }
     });
 
@@ -442,6 +482,8 @@ export class OfficeMap {
       if (hit?.kind === 'agent') {
         this.selectedAgentId = hit.id;
         this.onSelectAgent(hit.id);
+      } else if (hit?.kind === 'visitor') {
+        this.onSelectVisitor(hit.id);
       } else if (hit?.kind === 'department') {
         this.onSelectDepartment(hit.id);
       } else {

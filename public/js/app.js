@@ -7,6 +7,8 @@
 import { api, connectEvents } from './api.js';
 import { OfficeMap } from './office.js';
 import { STATUS_COLORS, THEME_NAMES, agentSprite } from './sprites.js';
+import { markdownNode } from './markdown.js';
+import { openWindow, closeWindow, isWindowOpen, refreshWindow } from './windows.js';
 
 // --- tiny DOM helpers -------------------------------------------------------
 
@@ -88,6 +90,7 @@ async function boot() {
 
   map = new OfficeMap(canvas, {
     onSelectAgent: (id) => openAgent(id),
+    onSelectVisitor: (id) => openVisitor(id),
     onSelectDepartment: (id) => openPanel('departments', { highlight: id }),
     onBackground: () => closePanel(),
   });
@@ -123,7 +126,7 @@ function wireChrome() {
   $('#side-close').addEventListener('click', closePanel);
   $('#btn-fit').addEventListener('click', () => map.fit());
   $('#btn-zoom-in').addEventListener('click', () => {
-    map.camera.zoomIndex = Math.min(4, map.camera.zoomIndex + 1);
+    map.camera.zoomIndex = Math.min(map.maxZoomIndex, map.camera.zoomIndex + 1);
   });
   $('#btn-zoom-out').addEventListener('click', () => {
     map.camera.zoomIndex = Math.max(0, map.camera.zoomIndex - 1);
@@ -144,6 +147,8 @@ function wireChrome() {
     }
   });
 
+  wireSideResize();
+
   $('#modal-close').addEventListener('click', closeModal);
   $('#modal-backdrop').addEventListener('click', (e) => {
     if (e.target === $('#modal-backdrop')) closeModal();
@@ -154,6 +159,47 @@ function wireChrome() {
       if (!$('#modal-backdrop').hidden) closeModal();
       else closePanel();
     }
+  });
+}
+
+/** Let the right-hand panel be dragged wider or narrower, and remember it. */
+function wireSideResize() {
+  const side = $('#side');
+  const grip = $('#side-resize');
+
+  const stored = Number(localStorage.getItem('mo.sideWidth'));
+  if (stored >= 320) side.style.setProperty('--side-w', `${stored}px`);
+
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    document.body.classList.add('resizing');
+
+    const move = (ev) => {
+      // The panel is anchored right, so width grows as the pointer moves left.
+      const width = Math.min(
+        Math.max(window.innerWidth - ev.clientX, 320),
+        Math.max(360, window.innerWidth - 240)
+      );
+      side.style.setProperty('--side-w', `${Math.round(width)}px`);
+    };
+
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.classList.remove('resizing');
+      const width = parseInt(side.style.getPropertyValue('--side-w'), 10);
+      if (width) {
+        try {
+          localStorage.setItem('mo.sideWidth', String(width));
+        } catch {
+          /* private browsing; the width simply will not persist */
+        }
+      }
+      map.resize();
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   });
 }
 
@@ -210,14 +256,17 @@ async function handleEvent({ type, data }) {
       if (state.panel === 'agent' && state.selectedAgentId === data.agentId) {
         renderPanel();
       }
+      syncAgentWindow(data.agentId);
       break;
     }
 
     case 'agent.activity': {
       if (state.panel === 'agent' && state.selectedAgentId === data.agentId) {
         state.activity.push(data);
-        if (state.agentTab === 'activity' || state.agentTab === 'orders') appendActivity(data);
       }
+      // Feeds find themselves by agent id, so this reaches the side panel and
+      // every floating window showing this agent.
+      appendActivity(data);
       break;
     }
 
@@ -333,6 +382,7 @@ function setPanel(title, body) {
 function renderPanel() {
   switch (state.panel) {
     case 'agent': return renderAgentPanel();
+    case 'visitor': return renderVisitorPanel();
     case 'hq': return renderHqPanel();
     case 'staff': return renderStaffPanel();
     case 'departments': return renderDepartmentsPanel();
@@ -386,6 +436,8 @@ function renderAgentPanel() {
         style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
       }),
     ]),
+    projectRow(agent),
+
     h('div.actions', {}, [
       status === 'offline' || status === 'error'
         ? h('button.btn.btn-primary.btn-sm', {
@@ -402,10 +454,15 @@ function renderAgentPanel() {
           onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
         }),
       h('button.btn.btn-sm', { text: '⌖ Find on map', onclick: () => map.focusAgent(agent.id) }),
+      h('button.btn.btn-sm', {
+        text: '⧉ Pop out',
+        title: 'Open a floating console, so you can watch several agents at once',
+        onclick: () => openAgentWindow(agent.id),
+      }),
     ]),
   ]);
 
-  const body = h('div');
+  const body = h('div.panel-content');
   const nav = tabs(
     [
       ['orders', 'Orders'],
@@ -421,11 +478,65 @@ function renderAgentPanel() {
   );
 
   setPanel(`${agent.name.toUpperCase()} — ${agent.title}`, [header, nav, body]);
+  // The Orders tab manages its own scrolling so the order box can sit at the
+  // bottom; every other tab scrolls as a normal document.
+  $('#side-body').dataset.layout = state.agentTab === 'orders' ? 'console' : 'scroll';
 
   if (state.agentTab === 'orders') renderOrders(body, agent);
   else if (state.agentTab === 'activity') renderActivity(body);
   else if (state.agentTab === 'config') renderAgentConfig(body, agent);
   else renderAgentMemory(body, agent);
+}
+
+/**
+ * Which project this agent is posted to, and a way to change it without
+ * digging through the Configuration tab.
+ */
+function projectRow(agent) {
+  const project = agent.projectId ? state.snapshot.projects.find((p) => p.id === agent.projectId) : null;
+
+  const picker = h(
+    'select',
+    {
+      onchange: async (e) => {
+        const projectId = e.target.value || null;
+        try {
+          const result = await api.updateAgent(agent.id, { projectId });
+          await refresh();
+          renderPanel();
+          toast({
+            title: projectId
+              ? `${agent.name} is posted to ${state.snapshot.projects.find((p) => p.id === projectId)?.name}`
+              : `${agent.name} has no fixed post`,
+            body: result.restartRequired
+              ? 'Send them home and recall them for the move to take effect.'
+              : '',
+            kind: result.restartRequired ? 'approval' : 'done',
+          });
+        } catch (err) {
+          toast({ title: 'Could not reassign them', body: err.message, kind: 'error' });
+        }
+      },
+    },
+    [
+      h('option', { value: '' }, ['— no fixed post —']),
+      ...state.snapshot.projects.map((p) =>
+        h('option', { value: p.id, selected: p.id === agent.projectId ? true : null }, [p.name])
+      ),
+    ]
+  );
+
+  return h('div.project-row', {}, [
+    h('div.project-label', { text: 'PROJECT' }),
+    picker,
+    h('div.card-sub', {
+      text: project
+        ? project.directory
+        : state.snapshot.projects.length
+          ? 'They work from your home directory until posted.'
+          : 'No projects yet — add one under Projects.',
+    }),
+  ]);
 }
 
 /** A live-rendered portrait of the agent, from the same sprite the map uses. */
@@ -442,10 +553,16 @@ function portrait(agent) {
   return canvas;
 }
 
-function renderOrders(container, agent) {
+/**
+ * The agent console: their activity feed, with the order box pinned beneath it.
+ *
+ * Used by both the right-hand panel and every floating window, so an agent
+ * behaves identically wherever you are watching them from.
+ */
+function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   const input = h('textarea', {
     placeholder: `Speak, and ${agent.name} obeys…`,
-    rows: 4,
+    rows: 3,
   });
 
   const send = async () => {
@@ -467,67 +584,195 @@ function renderOrders(container, agent) {
     (a) => a.status === 'pending' && a.agentId === agent.id
   );
 
-  container.replaceChildren(
-    h('div.lord-note', {
-      text:
-        'You speak as Lord Marcos, their god and employer. They address you as The Lord Almighty, ' +
-        'He Who Is Everywhere and Rules Over All.',
-    }),
-    ...(waiting.length
-      ? [h('div', {}, waiting.map((a) => approvalCard(a, { compact: true })))]
-      : []),
+  // The feed is tagged with the agent so live events can find every view of
+  // them at once — side panel and floating windows alike. `data-feed-filter`
+  // tells appendActivity which entries this particular view wants.
+  const scroller = h(
+    'div.feed-scroll',
+    { 'data-feed-agent': agent.id, 'data-feed-filter': 'chat' },
+    [
+      showNote &&
+        h('div.lord-note', {
+          text:
+            'You speak as Lord Marcos, their god and employer. They address you as ' +
+            'The Lord Almighty, He Who Is Everywhere and Rules Over All.',
+        }),
+      ...(waiting.length ? waiting.map((a) => approvalCard(a, { compact: true })) : []),
+      h('div.feed.feed-chat', {}, (activity || []).filter(isChat).slice(-250).map(chatNode)),
+    ]
+  );
+
+  const console_ = h('div.console', {}, [
+    scroller,
     h('div.order-box', {}, [
       input,
       h('div.actions', {}, [
-        h('button.btn.btn-gold', { text: 'Issue order', onclick: send }),
+        h('button.btn.btn-gold.btn-sm', { text: 'Issue order', onclick: send }),
         h('span.spacer'),
         h('span.card-sub', { text: 'Ctrl+Enter' }),
       ]),
     ]),
-    h('div.feed', { id: 'feed' }, state.activity.slice(-80).map(activityNode))
-  );
+  ]);
+
+  // Start at the newest entry.
+  requestAnimationFrame(() => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+
+  return console_;
+}
+
+function renderOrders(container, agent) {
+  container.replaceChildren(buildAgentConsole(agent, { activity: state.activity }));
 }
 
 function renderActivity(container) {
+  const entries = state.activity.filter(isOperational);
+
   container.replaceChildren(
-    state.activity.length
-      ? h('div.feed', { id: 'feed' }, state.activity.slice(-250).map(activityNode))
-      : h('div.empty', { text: 'Nothing recorded yet this session.' })
+    h('div.hint', {
+      text:
+        'What they did, rather than what they said: tools used, leave requested, ' +
+        'and how each task ended. The conversation itself is under Orders.',
+      style: { marginBottom: '10px' },
+    }),
+    entries.length
+      ? h(
+          'div.feed-scroll',
+          { 'data-feed-agent': state.selectedAgentId, 'data-feed-filter': 'ops' },
+          [h('div.feed', {}, entries.slice(-300).map(activityNode))]
+        )
+      : h('div.empty', { text: 'Nothing done yet this session.' })
   );
 }
 
+/**
+ * A conversation turn, rendered like a chat rather than a log line: your
+ * orders on one side, their replies on the other.
+ */
+function chatNode(entry) {
+  const mine = entry.kind === 'order';
+  return h(`div.chat-turn.chat-${mine ? 'lord' : 'agent'}`, {}, [
+    h('div.chat-who', {
+      text: mine ? `${state.snapshot?.office?.lordName || 'Lord Marcos'} · ${timeOf(entry.at)}` : timeOf(entry.at),
+    }),
+    h('div.chat-bubble', {}, [markdownNode(String(entry.text ?? '').slice(0, 20000))]),
+  ]);
+}
+
+/**
+ * The two views of an agent's record.
+ *
+ * ORDERS is the conversation — what you said, what they said back, and nothing
+ * else, as you would see it in the Claude CLI. ACTIVITY is the operational
+ * log: what they actually did, what they asked leave for, and how it ended.
+ */
+const CHAT_KINDS = new Set(['order', 'say']);
+const OPERATIONAL_KINDS = new Set([
+  'tool', 'approval', 'result', 'system', 'error', 'stderr', 'thinking',
+]);
+
+const isChat = (entry) => CHAT_KINDS.has(entry.kind);
+const isOperational = (entry) => OPERATIONAL_KINDS.has(entry.kind);
+
+const ACTIVITY_LABELS = {
+  order: 'ORDER FROM THE LORD',
+  say: 'SAYS',
+  thinking: 'THINKING',
+  tool: null, // filled in from the tool name
+  approval: 'APPROVAL',
+  result: 'COMPLETE',
+  error: 'ERROR',
+  system: 'OFFICE',
+  stderr: 'STDERR',
+};
+
+/** Which kinds are worth rendering as markdown rather than plain text. */
+const MARKDOWN_KINDS = new Set(['say', 'thinking']);
+
 function activityNode(entry) {
-  const label = {
-    order: 'ORDER FROM THE LORD',
-    say: 'SAYS',
-    thinking: 'THINKING',
-    tool: `USES ${entry.toolName || 'a tool'}`,
-    approval: 'APPROVAL',
-    result: 'COMPLETE',
-    error: 'ERROR',
-    system: 'OFFICE',
-    stderr: 'STDERR',
-  }[entry.kind] || entry.kind.toUpperCase();
+  const label =
+    entry.kind === 'tool'
+      ? `USES ${entry.toolName || 'a tool'}`
+      : ACTIVITY_LABELS[entry.kind] || entry.kind.toUpperCase();
+
+  const text = String(entry.text ?? '');
+  const body = MARKDOWN_KINDS.has(entry.kind)
+    ? markdownNode(text.slice(0, 20000))
+    : h('div.act-plain', { text: text.slice(0, 6000) });
 
   return h(`div.act.act-${entry.kind}`, {}, [
     h('div.act-meta', {}, [
       h('span', { text: timeOf(entry.at) }),
       h('span', { text: label }),
-      entry.subagent && h('span', { text: `· subagent` }),
+      entry.subagent && h('span', { text: '· subagent' }),
     ]),
-    h('div', { text: String(entry.text).slice(0, 4000) }),
+    body,
   ]);
 }
 
+/** Push a new entry into every open view of that agent that wants it. */
 function appendActivity(entry) {
-  const feed = document.getElementById('feed');
-  if (!feed) return;
-  const atBottom = feed.parentElement
-    ? feed.parentElement.scrollTop + feed.parentElement.clientHeight >=
-      feed.parentElement.scrollHeight - 60
-    : true;
-  feed.append(activityNode(entry));
-  if (atBottom) $('#side-body').scrollTop = $('#side-body').scrollHeight;
+  if (!entry.agentId) return;
+
+  for (const scroller of document.querySelectorAll(
+    `[data-feed-agent="${CSS.escape(entry.agentId)}"]`
+  )) {
+    const chat = scroller.dataset.feedFilter === 'chat';
+    if (chat ? !isChat(entry) : !isOperational(entry)) continue;
+
+    const feed = scroller.querySelector('.feed');
+    if (!feed) continue;
+
+    // Only follow the tail if the reader was already at the bottom.
+    const atBottom =
+      scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 80;
+    feed.append(chat ? chatNode(entry) : activityNode(entry));
+    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
+}
+
+// --- floating agent windows -------------------------------------------------
+
+const winKey = (agentId) => `agent:${agentId}`;
+
+/** Open a floating console for an agent, so several can be watched at once. */
+async function openAgentWindow(agentId) {
+  const agent = agentById(agentId);
+  if (!agent) return;
+
+  const key = winKey(agentId);
+  if (isWindowOpen(key)) return refreshWindow(key);
+
+  let activity = [];
+  try {
+    activity = (await api.activity(agentId)).activity;
+  } catch {
+    /* an agent that has never worked simply has nothing to show */
+  }
+
+  openWindow(key, {
+    title: `${agent.name} — ${agent.title}`,
+    subtitle: statusOf(agentId),
+    render: (body) => {
+      const live = agentById(agentId);
+      if (!live) return closeWindow(key);
+      // Re-reading the feed from the DOM would lose scroll position, so the
+      // stored activity is only used for the initial fill.
+      body.replaceChildren(buildAgentConsole(live, { activity, showNote: false }));
+    },
+  });
+}
+
+/** Keep any open floating window's status line in step. */
+function syncAgentWindow(agentId) {
+  const key = winKey(agentId);
+  if (!isWindowOpen(key)) return;
+  const agent = agentById(agentId);
+  refreshWindow(key, {
+    title: agent ? `${agent.name} — ${agent.title}` : 'Gone',
+    subtitle: statusOf(agentId),
+  });
 }
 
 // --- agent configuration ----------------------------------------------------
@@ -810,6 +1055,120 @@ async function renderAgentMemory(container, agent) {
       }),
     ])
   );
+}
+
+// --- visiting sessions ------------------------------------------------------
+
+async function openVisitor(sessionId) {
+  state.selectedVisitorId = sessionId;
+  openPanel('visitor');
+}
+
+function renderVisitorPanel() {
+  const sessionId = state.selectedVisitorId;
+  const visitor = (state.snapshot.visitors || []).find((v) => v.sessionId === sessionId);
+
+  if (!visitor) {
+    return setPanel('VISITOR', h('div.empty', { text: 'That session is no longer running.' }));
+  }
+
+  const feed = h('div.feed-scroll', {}, [h('div.empty', { text: 'Reading their transcript…' })]);
+
+  setPanel(`VISITOR — ${visitor.name || sessionId.slice(0, 8)}`, [
+    h('div.card', {}, [
+      h('div.card-head', {}, [
+        h('div', { style: { flex: '1', minWidth: '0' } }, [
+          h('div.card-title', { text: visitor.name || 'unnamed session' }),
+          h('div.card-sub', { text: visitor.cwd || '' }),
+          h('div.card-sub', {
+            text:
+              `${visitor.kind} · pid ${visitor.pid ?? '?'} · ${sessionId}` +
+              (visitor.startedAt ? ` · started ${timeOf(visitor.startedAt)}` : ''),
+          }),
+        ]),
+        h('span.pill.pill-status', {
+          text: visitor.status,
+          style: {
+            color: STATUS_COLORS[visitor.status === 'busy' ? 'working' : 'idle'],
+          },
+        }),
+      ]),
+      h('div.hint', {
+        text:
+          'You started this session yourself in a terminal, so the office only watches ' +
+          'it. Take it onto the payroll and it becomes staff — calling them to duty ' +
+          'resumes this very conversation.',
+      }),
+      h('div.actions', {}, [
+        h('button.btn.btn-gold.btn-sm', {
+          text: '＋ Take onto the payroll',
+          onclick: () => openAdoptForm(visitor),
+        }),
+      ]),
+    ]),
+    h('h4', { text: 'Their transcript', style: { margin: '14px 0 8px', color: 'var(--gold)' } }),
+    feed,
+  ]);
+
+  $('#side-body').dataset.layout = 'scroll';
+
+  api
+    .visitorTranscript(sessionId)
+    .then(({ activity }) => {
+      feed.replaceChildren(
+        activity.length
+          ? h('div.feed', {}, activity.slice(-150).map(activityNode))
+          : h('div.empty', { text: 'Nothing readable in that transcript yet.' })
+      );
+    })
+    .catch((err) => {
+      feed.replaceChildren(h('div.empty', { text: `Could not read it: ${err.message}` }));
+    });
+}
+
+function openAdoptForm(visitor) {
+  const suggested = (visitor.name || 'Contractor').replace(/[^a-zA-Z]/g, '') || 'Contractor';
+  const name = h('input', { type: 'text', value: suggested });
+  const title = h('input', { type: 'text', value: 'Contractor' });
+  const dept = h(
+    'select',
+    {},
+    state.snapshot.departments.map((d) => h('option', { value: d.id }, [d.name]))
+  );
+
+  openModal('Take this session onto the payroll', [
+    h('div.hint', {
+      text:
+        'A desk is found for them and their session id is kept, so when you call them ' +
+        'to duty they carry on from where this conversation left off. Close the ' +
+        'terminal running it first, or the two will talk over each other.',
+      style: { marginBottom: '12px' },
+    }),
+    h('div.row', {}, [field('Name', name), field('Title', title)]),
+    field('Department', dept),
+    h('div.actions', {}, [
+      h('button.btn.btn-primary', {
+        text: 'Hire them',
+        onclick: async () => {
+          try {
+            const agent = await api.adoptVisitor(visitor.sessionId, {
+              name: name.value,
+              title: title.value,
+              departmentId: dept.value,
+              cwd: visitor.cwd,
+            });
+            closeModal();
+            await refresh();
+            toast({ title: `${agent.name} joins the office`, kind: 'done' });
+            openAgent(agent.id);
+          } catch (err) {
+            toast({ title: 'Could not hire them', body: err.message, kind: 'error' });
+          }
+        },
+      }),
+      h('button.btn', { text: 'Cancel', onclick: closeModal }),
+    ]),
+  ]);
 }
 
 // --- HQ ---------------------------------------------------------------------
@@ -1135,6 +1494,33 @@ function renderDepartmentsPanel() {
         h('span.pill', { text: `${staff.length}/${dept.seats} seats` }),
       ]),
       h('div.row', {}, [field('Name', name), field('Desks', seats), field('Decor', theme)]),
+
+      field(
+        'Head of department',
+        h(
+          'select',
+          {
+            onchange: (e) =>
+              guard(
+                () => api.setDepartmentHead(dept.id, e.target.value || null),
+                e.target.value
+                  ? 'Appointed. They answer to the CEO; the department answers to them.'
+                  : 'The post is vacant; the department answers to the CEO.'
+              ),
+          },
+          [
+            h('option', { value: '' }, ['— vacant —']),
+            ...staff.map((a) =>
+              h('option', { value: a.id, selected: a.id === dept.headAgentId ? true : null }, [
+                `${a.name} (${a.title})`,
+              ])
+            ),
+          ]
+        ),
+        'Takes the desk at the front of the room, answers to the CEO, and everyone ' +
+          'else here answers to them.'
+      ),
+
       field('Department context', context, 'Inherited by everyone who serves here.'),
       h('div.actions', {}, [
         h('button.btn.btn-primary.btn-sm', {
@@ -1299,6 +1685,9 @@ function renderComponentsPanel() {
     }),
 
     h('h4', { text: `Skills (${skills.length})`, style: { margin: '6px 0 8px', color: 'var(--gold)' } }),
+    h('div.actions', { style: { marginBottom: '10px' } }, [
+      h('button.btn.btn-sm', { text: '+ Install a skill', onclick: () => openSkillForm() }),
+    ]),
     skills.length
       ? h('div', {}, skills.map((s) =>
           h('div.card', {}, [
@@ -1307,9 +1696,41 @@ function renderComponentsPanel() {
               h('span.pill', { text: s.source }),
             ]),
             s.description && h('div.card-sub', { text: s.description }),
+            h('div.card-sub', { text: s.path || '' }),
+            h('div.actions', {}, [
+              // Only skills installed for the user live somewhere we may touch.
+              s.source === 'user' &&
+                h('button.btn.btn-sm', {
+                  text: 'Edit',
+                  onclick: () => openSkillForm(s.name),
+                }),
+              s.source === 'user' &&
+                h('button.btn.btn-danger.btn-sm', {
+                  text: 'Uninstall',
+                  onclick: async () => {
+                    if (
+                      !confirm(
+                        `Delete the skill "${s.name}" from ~/.claude/skills?\n\n` +
+                          `This removes it from disk for every Claude session on this ` +
+                          `machine, not just this office.`
+                      )
+                    ) {
+                      return;
+                    }
+                    await guard(() => api.deleteSkill(s.name), `${s.name} uninstalled.`);
+                  },
+                }),
+              s.source !== 'user' &&
+                h('span.card-sub', { text: 'Lives in a project — manage it there.' }),
+            ]),
           ])
         ))
       : h('div.empty', { text: 'No skills found in ~/.claude/skills or your projects.' }),
+    h('div.hint', {
+      text:
+        'Installed skills are available to every agent. Withhold one from a particular ' +
+        'agent in their Configuration tab.',
+    }),
 
     h('h4', { text: `MCP servers (${mcpServers.length})`, style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
     h('div.actions', { style: { marginBottom: '10px' } }, [
@@ -1335,6 +1756,82 @@ function renderComponentsPanel() {
           'send_message · check_inbox · request_approval · remember · recall · roster · petition_lord. ' +
           'Granted to every member of staff automatically.',
       }),
+    ]),
+  ]);
+}
+
+/** Install a new skill, or edit one already installed for the user. */
+async function openSkillForm(existingName = null) {
+  const name = h('input', {
+    type: 'text',
+    placeholder: 'release-notes',
+    value: existingName || '',
+    disabled: existingName ? true : null,
+  });
+  const description = h('textarea', {
+    rows: 3,
+    placeholder:
+      'When to use this skill. Claude reads this to decide whether to invoke it, so ' +
+      'be concrete about the triggers.',
+  });
+  const content = h('textarea', {
+    rows: 14,
+    placeholder: '# release-notes\n\nStep-by-step instructions for the agent…',
+  });
+
+  if (existingName) {
+    try {
+      const { content: source } = await api.readSkill(existingName);
+      // Split the front matter off so the two fields line up with the file.
+      const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+      if (match) {
+        const desc = match[1].match(/^description:\s*(.*)$/m);
+        if (desc) description.value = desc[1].trim().replace(/^["']|["']$/g, '');
+        content.value = match[2].trim();
+      } else {
+        content.value = source;
+      }
+    } catch (err) {
+      toast({ title: 'Could not read that skill', body: err.message, kind: 'error' });
+      return;
+    }
+  }
+
+  openModal(existingName ? `Edit skill: ${existingName}` : 'Install a skill', [
+    h('div.hint', {
+      text:
+        'Skills are written to ~/.claude/skills/<name>/SKILL.md and become available ' +
+        'to every agent in this office — and to every other Claude session on this ' +
+        'machine.',
+      style: { marginBottom: '12px' },
+    }),
+    field('Name', name, 'Lower-case letters, digits and hyphens.'),
+    field('Description', description, 'How Claude decides when to reach for it.'),
+    field('Instructions (markdown)', content),
+    h('div.actions', {}, [
+      h('button.btn.btn-primary', {
+        text: existingName ? 'Save' : 'Install',
+        onclick: async () => {
+          try {
+            // Editing is a delete-then-write; the API refuses to overwrite.
+            if (existingName) await api.deleteSkill(existingName);
+            await api.addSkill({
+              name: existingName || name.value,
+              description: description.value,
+              content: content.value,
+            });
+            closeModal();
+            await refresh();
+            toast({
+              title: existingName ? `${existingName} saved` : `${name.value} installed`,
+              kind: 'done',
+            });
+          } catch (err) {
+            toast({ title: 'Could not save the skill', body: err.message, kind: 'error' });
+          }
+        },
+      }),
+      h('button.btn', { text: 'Cancel', onclick: closeModal }),
     ]),
   ]);
 }

@@ -59,10 +59,21 @@ export function buildPersona(agentId) {
   if (office.motto) p += section('Motto', `*"${office.motto}"*`);
 
   if (dept) {
-    p += section(
-      `Your Department — ${dept.name}`,
-      dept.context || `You serve in the ${dept.name} department.`
-    );
+    const head = dept.headAgentId ? store.agent(dept.headAgentId) : null;
+    const isHead = head?.id === agentId;
+
+    let deptText = dept.context || `You serve in the ${dept.name} department.`;
+    if (isHead) {
+      deptText +=
+        `\n\nYou are the Head of ${dept.name}. You answer to the Chief Executive ` +
+        `Officer, and everyone else in this department answers to you. Their work ` +
+        `is your responsibility: brief them, judge their proposals, and carry ` +
+        `upward only what genuinely needs deciding above you.`;
+    } else if (head) {
+      deptText += `\n\nThe Head of ${dept.name} is ${head.name} (${head.title}).`;
+    }
+
+    p += section(`Your Department — ${dept.name}`, deptText);
   }
 
   // Briefings flow downward: the CEO's briefing reaches everyone beneath them.

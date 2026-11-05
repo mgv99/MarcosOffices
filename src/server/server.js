@@ -28,6 +28,7 @@ import {
   allWorkerStates,
   activityFor,
   stopAll,
+  summariseToolCall,
 } from './runtime.js';
 import {
   externalSessions,
@@ -44,6 +45,7 @@ import {
   deleteAgent,
   createDepartment,
   deleteDepartment,
+  setDepartmentHead,
   seedOffice,
   clamp,
 } from './operations.js';
@@ -229,6 +231,14 @@ route('PATCH', /^\/api\/departments\/([\w]+)$/, async (req, res, [id]) => {
   ok(res, dept);
 });
 
+/** Appoint (or clear) the head of a department. */
+route('POST', /^\/api\/departments\/([\w]+)\/head$/, async (req, res, [id]) => {
+  const { agentId } = await readBody(req);
+  const result = setDepartmentHead(id, agentId || null);
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, result.department);
+});
+
 route('DELETE', /^\/api\/departments\/([\w]+)$/, async (req, res, [id]) => {
   const result = deleteDepartment(id);
   if (!result.ok) return fail(res, 409, result.error);
@@ -409,6 +419,89 @@ route('POST', /^\/api\/messages$/, async (req, res) => {
   ok(res, postMessage({ fromAgentId: 'lord', toAgentId, subject, body }));
 });
 
+// --- visiting sessions ----------------------------------------------------
+
+/** Read the transcript of a session the office does not own. */
+route('GET', /^\/api\/visitors\/([\w-]+)\/transcript$/, async (req, res, [sessionId]) => {
+  try {
+    const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk');
+    const messages = await getSessionMessages(sessionId, { limit: 200 });
+    ok(res, { activity: messages.map(transcriptToActivity).filter(Boolean) });
+  } catch (err) {
+    fail(res, 404, `could not read that session: ${err.message}`);
+  }
+});
+
+/**
+ * Take a session Lord Marcos started himself onto the payroll. The new agent
+ * keeps the session id, so calling them to duty resumes that very conversation
+ * rather than starting a fresh one.
+ */
+route('POST', /^\/api\/visitors\/([\w-]+)\/adopt$/, async (req, res, [sessionId]) => {
+  const body = await readBody(req);
+  if (!body.departmentId) return fail(res, 400, 'choose a department for them');
+
+  // If the session was working in a directory we already call a project, post
+  // them there; otherwise leave them unposted rather than inventing a project.
+  const project = body.cwd
+    ? store.state.projects.find(
+        (p) => path.resolve(p.directory).toLowerCase() === path.resolve(body.cwd).toLowerCase()
+      )
+    : null;
+
+  const result = createAgent({
+    name: body.name?.trim() || 'Adopted',
+    title: body.title?.trim() || 'Contractor',
+    departmentId: body.departmentId,
+    context:
+      body.context ||
+      'You were working as an independent session before Lord Marcos took you onto ' +
+        'the payroll. Your prior conversation is your own memory of that work; carry ' +
+        'on from it, but you now answer to this office and its chain of command.',
+    model: body.model || 'sonnet',
+    projectId: project?.id || null,
+  });
+
+  if (!result.ok) return fail(res, 400, result.error);
+
+  result.agent.lastSessionId = sessionId;
+  store.save();
+  bus.emitEvent('agent.updated', result.agent);
+  ok(res, result.agent);
+});
+
+/** Turn a stored transcript entry into the shape the activity feed renders. */
+function transcriptToActivity(message) {
+  const at = Date.parse(message.timestamp || '') || Date.now();
+  const base = { id: message.uuid || newId('act_'), at, agentId: null };
+
+  if (message.type === 'user') {
+    const content = message.message?.content;
+    const text =
+      typeof content === 'string'
+        ? content
+        : (content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    return text.trim() ? { ...base, kind: 'order', text } : null;
+  }
+
+  if (message.type === 'assistant') {
+    const blocks = message.message?.content || [];
+    const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    if (text.trim()) return { ...base, kind: 'say', text };
+
+    const call = blocks.find((b) => b.type === 'tool_use');
+    if (call) {
+      return {
+        ...base,
+        kind: 'tool',
+        toolName: call.name,
+        text: summariseToolCall(call.name, call.input),
+      };
+    }
+  }
+  return null;
+}
+
 // --- components -----------------------------------------------------------
 
 route('GET', /^\/api\/components$/, async (req, res) => {
@@ -418,6 +511,92 @@ route('GET', /^\/api\/components$/, async (req, res) => {
     availableMcpServers(projectDirs),
   ]);
   ok(res, { skills, mcpServers, registry: store.state.components });
+});
+
+const USER_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
+
+/** Skill directory names must be a plain slug — they become a path and a tool name. */
+function skillDir(name) {
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) return null;
+  const dir = path.resolve(USER_SKILLS_DIR, name);
+  // Belt and braces: never escape the skills directory.
+  return dir.startsWith(path.resolve(USER_SKILLS_DIR)) ? dir : null;
+}
+
+/**
+ * Install a skill into ~/.claude/skills. Every agent can then use it, and it
+ * can be enabled or withheld per agent from their Configuration tab.
+ */
+route('POST', /^\/api\/components\/skills$/, async (req, res) => {
+  const { name, description = '', content = '' } = await readBody(req);
+  const slug = String(name || '').trim().toLowerCase();
+
+  const dir = skillDir(slug);
+  if (!dir) {
+    return fail(
+      res,
+      400,
+      'a skill name must be lower-case letters, digits and hyphens, e.g. "release-notes"'
+    );
+  }
+  if (!description.trim()) {
+    return fail(res, 400, 'a skill needs a description — it is how Claude decides to use it');
+  }
+
+  try {
+    await fsp.access(dir);
+    return fail(res, 409, `a skill called "${slug}" already exists`);
+  } catch {
+    /* good: it does not exist yet */
+  }
+
+  // Front matter must be literal YAML; quote anything that could break it.
+  const yamlSafe = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const body =
+    `---\nname: ${slug}\ndescription: ${yamlSafe(description.trim())}\n---\n\n` +
+    (content.trim() || `# ${slug}\n\nDescribe here what this skill should do.\n`);
+
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(path.join(dir, 'SKILL.md'), body, 'utf8');
+
+  bus.emitEvent('components.updated', {});
+  ok(res, { name: slug, path: dir });
+});
+
+/** Remove a skill from disk. Only ever touches ~/.claude/skills. */
+route('DELETE', /^\/api\/components\/skills\/([\w-]+)$/, async (req, res, [name]) => {
+  const dir = skillDir(String(name).toLowerCase());
+  if (!dir) return fail(res, 400, 'that is not a valid skill name');
+
+  try {
+    await fsp.access(path.join(dir, 'SKILL.md'));
+  } catch {
+    return fail(res, 404, `no skill called "${name}" is installed for your user`);
+  }
+
+  await fsp.rm(dir, { recursive: true, force: true });
+
+  // Stop offering it to staff who had it enabled.
+  for (const agent of store.state.agents) {
+    if (agent.enabledSkills?.includes(name)) {
+      agent.enabledSkills = agent.enabledSkills.filter((s) => s !== name);
+    }
+  }
+  store.save();
+
+  bus.emitEvent('components.updated', {});
+  ok(res);
+});
+
+/** Read a skill's source, so it can be inspected or edited. */
+route('GET', /^\/api\/components\/skills\/([\w-]+)$/, async (req, res, [name]) => {
+  const dir = skillDir(String(name).toLowerCase());
+  if (!dir) return fail(res, 400, 'that is not a valid skill name');
+  try {
+    ok(res, { name, content: await fsp.readFile(path.join(dir, 'SKILL.md'), 'utf8') });
+  } catch {
+    fail(res, 404, 'that skill is not installed for your user');
+  }
 });
 
 route('POST', /^\/api\/components\/mcp$/, async (req, res) => {

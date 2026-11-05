@@ -180,6 +180,15 @@ class Store {
     s.notifications ??= [];
     s.messages ??= [];
 
+    // Rooms used to be laid out without a head of department's desk at the
+    // front. Grow the old ones so the new seating plan fits inside them.
+    for (const d of s.departments) {
+      d.headAgentId ??= null;
+      if ((d.h || 0) < 16) d.h = 16;
+      if ((d.w || 0) < 14) d.w = 14;
+      if ((d.seats || 0) < 9) d.seats = 9;
+    }
+
     for (const a of s.agents) {
       a.allowedTools ??= [];
       a.disallowedTools ??= [];

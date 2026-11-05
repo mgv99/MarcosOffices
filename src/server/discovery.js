@@ -62,8 +62,20 @@ function firstJson(text) {
 }
 
 /**
+ * Tells us whether a session belongs to this office. Injected by the runtime,
+ * which is the only thing that knows which sessions it spawned.
+ */
+let isOwnedByOffice = () => false;
+export function setOwnershipTest(fn) {
+  isOwnedByOffice = fn;
+}
+
+/**
  * Sessions currently alive on this machine, from `claude agents --json`.
  * The exact field names have varied between CLI versions, so read defensively.
+ *
+ * Sessions the office spawned itself are filtered out: they already have a
+ * desk, and listing them again as visitors would double-count the staff.
  */
 export async function externalSessions() {
   try {
@@ -71,16 +83,18 @@ export async function externalSessions() {
     const parsed = firstJson(raw);
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.map((s) => ({
-      sessionId: s.sessionId || s.session_id || s.id || null,
-      pid: s.pid ?? null,
-      name: s.name || s.title || null,
-      cwd: s.cwd || s.directory || null,
-      kind: s.kind || s.type || 'interactive',
-      status: normaliseStatus(s.status),
-      startedAt: toMillis(s.startedAt ?? s.started_at ?? s.createdAt ?? s.created_at),
-      model: s.model || null,
-    }));
+    return parsed
+      .map((s) => ({
+        sessionId: s.sessionId || s.session_id || s.id || null,
+        pid: s.pid ?? null,
+        name: s.name || s.title || null,
+        cwd: s.cwd || s.directory || null,
+        kind: s.kind || s.type || 'interactive',
+        status: normaliseStatus(s.status),
+        startedAt: toMillis(s.startedAt ?? s.started_at ?? s.createdAt ?? s.created_at),
+        model: s.model || null,
+      }))
+      .filter((s) => !isOwnedByOffice(s));
   } catch (err) {
     return [];
   }

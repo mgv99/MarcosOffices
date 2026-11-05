@@ -27,6 +27,8 @@ export const api = {
   seed: () => request('POST', '/api/office/seed'),
 
   createDepartment: (body) => request('POST', '/api/departments', body),
+  setDepartmentHead: (id, agentId) =>
+    request('POST', `/api/departments/${id}/head`, { agentId }),
   updateDepartment: (id, patch) => request('PATCH', `/api/departments/${id}`, patch),
   deleteDepartment: (id) => request('DELETE', `/api/departments/${id}`),
 
@@ -57,6 +59,12 @@ export const api = {
 
   components: () => request('GET', '/api/components'),
   addMcp: (name, config) => request('POST', '/api/components/mcp', { name, config }),
+  addSkill: (body) => request('POST', '/api/components/skills', body),
+  readSkill: (name) => request('GET', `/api/components/skills/${name}`),
+  deleteSkill: (name) => request('DELETE', `/api/components/skills/${name}`),
+
+  visitorTranscript: (sessionId) => request('GET', `/api/visitors/${sessionId}/transcript`),
+  adoptVisitor: (sessionId, body) => request('POST', `/api/visitors/${sessionId}/adopt`, body),
 
   auth: () => request('GET', '/api/auth'),
   login: () => request('POST', '/api/auth/login'),

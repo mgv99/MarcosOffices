@@ -38,8 +38,13 @@ is in session.
 ## The office
 
 Departments are rooms on a tile grid; each has a seat count, its own decor, and its
-own context inherited by everyone who serves there. Agents sit at desks with a status
-bubble over their head:
+own context inherited by everyone who serves there.
+
+Each department has a **head of department**, who sits alone at the desk at the front
+of the room. The head answers to the CEO; everyone else in the department answers to
+the head. Behind them, staff fill rows of four.
+
+Agents sit at desks with a status bubble over their head:
 
 | Bubble | Meaning |
 | --- | --- |
@@ -52,6 +57,31 @@ bubble over their head:
 Drag to pan, scroll to zoom, click an agent to open their panel. Every sprite is drawn
 in code from a hash of the agent's id — there are no image files, and each member of
 staff looks like themselves permanently.
+
+### Watching an agent
+
+Each agent has four tabs, and the first two are deliberately different things:
+
+- **Orders** — the conversation, and only the conversation: what you said and what
+  they said back, rendered as markdown, exactly as you would read it in the CLI.
+- **Activity** — what they *did*: tools used, leave requested, how each task ended.
+- **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
+- **Memory** — their private memory file, editable.
+
+**Pop out** opens a floating console on the map. Drag it by its title bar, resize it
+from any corner, and open as many as you like — the right-hand panel only ever shows
+one agent, so this is how you watch several at once. The panel itself can be dragged
+wider or narrower from its left edge.
+
+### Visiting sessions
+
+Claude sessions you started yourself in a terminal appear in the lobby below the
+office. Click one to read its transcript. **Take onto the payroll** hires it as
+staff, keeping its session id — so calling them to duty resumes that very
+conversation rather than starting a new one.
+
+Sessions the office spawned itself are filtered out of the lobby by session id, so
+staff never appear twice.
 
 ---
 
