@@ -13,7 +13,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { query, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 
-import { store, newId, emptyStats, LOGS_DIR } from './store.js';
+import { store, newId, emptyStats } from './store.js';
 import { bus } from './bus.js';
 import { buildPersona } from './persona.js';
 import {
@@ -85,6 +85,8 @@ export class AgentWorker {
     this.stopping = false;
     this.todos = [];
     this.commands = [];
+    // Which conversation the in-memory feed and log stream belong to.
+    this._loggedSession = null;
     // Guards against looping if a fresh session also fails to start.
     this._resumeRetried = false;
     this._logStream = null;
@@ -105,10 +107,29 @@ export class AgentWorker {
     });
   }
 
+  /**
+   * Point the record at a conversation. Each session keeps its own chat, so
+   * switching to another shows that one and a fresh session starts empty.
+   */
+  useSession(sessionId) {
+    if (sessionId === this._loggedSession) return;
+    this._loggedSession = sessionId;
+    this._logStream?.end();
+    this._logStream = null;
+
+    // Open on that conversation's own record: empty for a new session, and
+    // its history when picking an earlier one back up. Starting empty would
+    // make a resumed conversation look as though it had just begun.
+    this.activity = readActivityLog(this.agentId, sessionId, MAX_ACTIVITY_IN_MEMORY);
+
+    bus.emitEvent('agent.session', { agentId: this.agentId, sessionId });
+  }
+
   log(kind, text, meta = {}) {
     const entry = {
       id: newId('act_'),
       agentId: this.agentId,
+      sessionId: this._loggedSession || null,
       at: Date.now(),
       kind,
       text,
@@ -118,11 +139,14 @@ export class AgentWorker {
     if (this.activity.length > MAX_ACTIVITY_IN_MEMORY) this.activity.shift();
 
     try {
-      this._logStream ??= fs.createWriteStream(
-        path.join(LOGS_DIR, `${this.agentId}.jsonl`),
-        { flags: 'a' }
-      );
-      this._logStream.write(JSON.stringify(entry) + '\n');
+      const file = store.sessionLogFile(this.agentId, this._loggedSession);
+      if (file) {
+        if (!this._logStream) {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          this._logStream = fs.createWriteStream(file, { flags: 'a' });
+        }
+        this._logStream.write(JSON.stringify(entry) + '\n');
+      }
     } catch {
       /* logging must never break the office */
     }
@@ -305,6 +329,10 @@ export class AgentWorker {
       options.sessionId = fresh;
       this.sessionId = fresh;
     }
+
+    // Bind the record to this conversation before anything is written, so a
+    // fresh session opens on an empty chat rather than the previous one's.
+    this.useSession(this.sessionId);
 
     return options;
   }
@@ -719,14 +747,22 @@ export function allWorkerStates() {
  * conversation itself survives in the Claude session either way.
  */
 export function activityFor(agentId, limit = 200) {
+  const agent = store.agent(agentId);
+  const sessionId = agent?.lastSessionId || null;
   const worker = workers.get(agentId);
-  if (worker?.activity.length) return worker.activity.slice(-limit);
-  return readActivityLog(agentId, limit);
+
+  // Only trust the in-memory feed when it belongs to the session being shown;
+  // otherwise read that session's own record from disk.
+  if (worker?.activity.length && worker._loggedSession === sessionId) {
+    return worker.activity.slice(-limit);
+  }
+  return readActivityLog(agentId, sessionId, limit);
 }
 
-/** Read the tail of an agent's activity log. */
-export function readActivityLog(agentId, limit = 200) {
-  const file = path.join(LOGS_DIR, `${agentId}.jsonl`);
+/** Read the tail of one conversation's record. */
+export function readActivityLog(agentId, sessionId, limit = 200) {
+  const file = store.sessionLogFile(agentId, sessionId);
+  if (!file) return [];
 
   let raw;
   try {

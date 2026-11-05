@@ -163,6 +163,7 @@ class Store {
     }
 
     this._migrateLegacyMemory();
+    this.migrateAgentLogs();
     return this.state;
   }
 
@@ -333,6 +334,36 @@ class Store {
 
   agentDir(id) {
     return path.join(AGENTS_DIR, id);
+  }
+
+  /**
+   * Each conversation keeps its own record, so switching sessions shows that
+   * session's chat and a fresh one starts empty.
+   */
+  sessionLogFile(agentId, sessionId) {
+    if (!sessionId) return null;
+    const dir = path.resolve(LOGS_DIR, agentId);
+    const file = path.resolve(dir, `${String(sessionId).replace(/[^\w-]/g, '')}.jsonl`);
+    return file.startsWith(dir) ? file : null;
+  }
+
+  /**
+   * Records used to be one flat file per agent, covering every conversation
+   * at once. Attribute an old one to the session it belonged to, so existing
+   * history survives rather than appearing under every session.
+   */
+  migrateAgentLogs() {
+    for (const agent of this.state.agents) {
+      const legacy = path.join(LOGS_DIR, `${agent.id}.jsonl`);
+      const target = this.sessionLogFile(agent.id, agent.lastSessionId);
+      try {
+        if (!target || !fs.existsSync(legacy) || fs.existsSync(target)) continue;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.renameSync(legacy, target);
+      } catch {
+        /* leave it rather than lose it */
+      }
+    }
   }
 
   /** Where an agent's memory files live, one per topic. */

@@ -356,6 +356,13 @@ async function handleEvent({ type, data }) {
       break;
     }
 
+    case 'agent.session': {
+      // They have moved to another conversation, which carries its own chat.
+      if (state.selectedAgentId === data.agentId) await loadActivity(data.agentId);
+      await reloadAgentWindow(data.agentId);
+      break;
+    }
+
     case 'agent.commands': {
       // Stored only. The palette reads this on each keystroke, so there is
       // nothing to re-render — and re-rendering here used to steal focus from
@@ -503,15 +510,23 @@ async function openAgent(id) {
   tree?.select(id);
   openPanel('agent');
 
+  await loadActivity(id);
+}
+
+/**
+ * Pull an agent's record for the conversation they are currently on. Each
+ * session keeps its own chat, so this is re-run whenever the session changes.
+ */
+async function loadActivity(id) {
   try {
     const { activity, todos } = await api.activity(id);
     state.activity = activity;
     state.todos = todos || [];
-    if (state.panel === 'agent' && state.selectedAgentId === id) renderPanel();
   } catch {
     state.activity = [];
     state.todos = [];
   }
+  if (state.panel === 'agent' && state.selectedAgentId === id) renderPanel();
 }
 
 function setPanel(title, body) {
@@ -1295,24 +1310,41 @@ async function openAgentWindow(agentId) {
   const key = winKey(agentId);
   if (isWindowOpen(key)) return refreshWindow(key);
 
-  let activity = [];
   try {
-    activity = (await api.activity(agentId)).activity;
+    windowActivity.set(agentId, (await api.activity(agentId)).activity);
   } catch {
-    /* an agent that has never worked simply has nothing to show */
+    windowActivity.set(agentId, []);
   }
 
   openWindow(key, {
     title: `${agent.name} — ${agent.title}`,
     subtitle: statusOf(agentId),
+    onClose: () => windowActivity.delete(agentId),
     render: (body) => {
       const live = agentById(agentId);
       if (!live) return closeWindow(key);
       // Re-reading the feed from the DOM would lose scroll position, so the
-      // stored activity is only used for the initial fill.
-      body.replaceChildren(buildAgentConsole(live, { activity, showNote: false }));
+      // stored activity is only used when the body is (re)built.
+      body.replaceChildren(
+        buildAgentConsole(live, { activity: windowActivity.get(agentId) || [], showNote: false })
+      );
     },
   });
+}
+
+/** The feed each floating window was opened with, by agent. */
+const windowActivity = new Map();
+
+/** A window showing an agent who has changed conversation needs the new one. */
+async function reloadAgentWindow(agentId) {
+  const key = winKey(agentId);
+  if (!isWindowOpen(key)) return;
+  try {
+    windowActivity.set(agentId, (await api.activity(agentId)).activity);
+  } catch {
+    windowActivity.set(agentId, []);
+  }
+  refreshWindow(key, { subtitle: statusOf(agentId), rerender: true });
 }
 
 /** Keep any open floating window's status line in step. */
