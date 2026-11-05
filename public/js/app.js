@@ -97,6 +97,13 @@ let map = null;
 let tree = null;
 let view = 'office'; // 'office' | 'tree'
 
+/**
+ * Watches the live order box so it can be re-sized when its width changes.
+ * Only one console is ever the "current" one, so the previous observer is
+ * disconnected rather than left holding a detached element.
+ */
+let orderBoxResize = null;
+
 const agentById = (id) => state.snapshot?.agents.find((a) => a.id === id) || null;
 const deptById = (id) => state.snapshot?.departments.find((d) => d.id === id) || null;
 const statusOf = (id) => state.snapshot?.workers?.[id]?.status || 'offline';
@@ -857,9 +864,26 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
    */
   const ORDER_BOX_MAX = 220;
   const autoGrow = () => {
+    // Measuring while the panel is sliding open gives a box a couple of dozen
+    // pixels wide, where any text wraps into a tower of lines. Wait for a
+    // real width; the observer below re-measures once there is one.
+    if (input.offsetWidth < 80) return;
     input.style.height = 'auto';
     input.style.height = `${Math.min(input.scrollHeight + 4, ORDER_BOX_MAX)}px`;
   };
+
+  // Re-measure whenever the box changes width: the side panel animates open,
+  // and can be dragged wider or narrower afterwards. Only width is acted on,
+  // so growing the height cannot feed back into another measurement.
+  orderBoxResize?.disconnect();
+  let lastWidth = 0;
+  orderBoxResize = new ResizeObserver((entries) => {
+    const width = entries[0].contentRect.width;
+    if (Math.abs(width - lastWidth) < 1) return;
+    lastWidth = width;
+    autoGrow();
+  });
+  orderBoxResize.observe(input);
 
   // Keep what is typed, so a re-render mid-sentence does not lose it.
   input.addEventListener('input', () => {
