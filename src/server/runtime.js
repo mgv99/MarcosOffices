@@ -239,9 +239,17 @@ export class AgentWorker {
     // has enabled for this particular agent.
     const mcpServers = { office: buildOfficeServer(this.agentId) };
 
-    // Only staff trusted to run the company get the management instruments.
-    if (agent.canManageOffice) {
-      mcpServers.hq = buildHqServer(this.agentId, { workerStates: allWorkerStates });
+    // The management instruments, as far as this agent's authority reaches:
+    // the whole office for staff trusted to run it, and their own department
+    // for whoever heads one. A head should be able to staff and run their own
+    // floor without being handed power over everybody else's.
+    const heads = store.state.departments.find((d) => d.headAgentId === agent.id);
+    if (agent.canManageOffice || heads) {
+      mcpServers.hq = buildHqServer(this.agentId, {
+        workerStates: allWorkerStates,
+        scope: agent.canManageOffice ? 'office' : 'department',
+        departmentId: heads?.id || null,
+      });
     }
 
     for (const name of agent.enabledMcpServers || []) {

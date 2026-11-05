@@ -100,14 +100,52 @@ async function propose(agentId, { title, detail, risk, severity = 'normal' }, ap
   );
 }
 
-export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
+/**
+ * The management instruments.
+ *
+ * `scope` decides how far they reach. An agent trusted to run the company gets
+ * the whole office; a head of department gets their own department and nothing
+ * else — they can staff and run their own floor without being handed authority
+ * over everybody else's.
+ */
+export function buildHqServer(
+  agentId,
+  { workerStates = () => ({}), scope = 'office', departmentId = null } = {}
+) {
+  const officeWide = scope === 'office';
+  const myDepartment = () =>
+    officeWide || !store.state ? null : store.department(departmentId);
+  const remit = () => (officeWide ? 'this office' : myDepartment()?.name || 'your department');
+
+  /** The staff this agent may look at and act on. */
+  const staffInRemit = () => {
+    const all = store.state?.agents || [];
+    return officeWide ? all : all.filter((a) => a.departmentId === departmentId);
+  };
+
+  /** Refuse, in words, when something falls outside the remit. */
+  const outOfRemit = (who) =>
+    text(
+      `${who} is not in ${remit()}, and your authority does not reach them. ` +
+        `Put it to the CEO instead — send_message or request_approval.`
+    );
+
+  const canAct = (agent) =>
+    !!agent && (officeWide || agent.departmentId === departmentId);
+
   return createSdkMcpServer({
     name: 'hq',
     version: '0.1.0',
-    instructions:
-      'The management instruments of Marcos Offices. Inspect the whole company, ' +
-      'account for what each member of staff costs, and propose changes to the ' +
-      'organisation itself. Changes require sanction before they take effect.',
+    instructions: officeWide
+      ? 'The management instruments of Marcos Offices. Inspect the whole company, ' +
+        'account for what each member of staff costs, and propose changes to the ' +
+        'organisation itself. Changes require sanction before they take effect.'
+      : `The management instruments for ${remit()}, which you head. They reach ` +
+        `your own department and no further: you may account for your staff, ` +
+        `propose hiring into your department, moving your people between ` +
+        `projects, putting them on shift, and letting them go. Changes require ` +
+        `sanction before they take effect. Anything beyond your department is ` +
+        `the CEO's to decide — write to them.`,
     tools: [
       // --- inspection ------------------------------------------------------
 
@@ -120,19 +158,29 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           const live = workerStates();
           const s = store.state;
 
-          const totalUsed = s.agents.reduce((n, a) => n + totalTokens(a.stats), 0);
-          const pending = s.approvals.filter((a) => a.status === 'pending');
+          const mine = staffInRemit();
+          const departments = officeWide
+            ? s.departments
+            : s.departments.filter((d) => d.id === departmentId);
 
-          const lines = [`# ${s.office.name}`, ''];
+          const totalUsed = mine.reduce((n, a) => n + totalTokens(a.stats), 0);
+          const pending = s.approvals.filter(
+            (a) => a.status === 'pending' && (officeWide || mine.some((m) => m.id === a.agentId))
+          );
+
+          const lines = [`# ${officeWide ? s.office.name : remit()}`, ''];
+          if (!officeWide) {
+            lines.push(`You head this department. The rest of the office is not yours to run.`);
+          }
           lines.push(
-            `Staff: ${s.agents.length} · Departments: ${s.departments.length} · ` +
+            `Staff: ${mine.length} · Departments: ${departments.length} · ` +
               `Projects: ${s.projects.length}`
           );
-          lines.push(`Total used to date: ${tokens(totalUsed)}`);
+          lines.push(`Used to date: ${tokens(totalUsed)}`);
           lines.push(`Awaiting sanction: ${pending.length}`);
           lines.push('');
 
-          for (const dept of s.departments) {
+          for (const dept of departments) {
             const staff = s.agents.filter((a) => a.departmentId === dept.id);
             const deptUsed = staff.reduce((n, a) => n + totalTokens(a.stats), 0);
             lines.push(
@@ -177,11 +225,12 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
         },
         async ({ agent: ref }) => {
           const live = workerStates();
-          let staff = store.state.agents;
+          let staff = staffInRemit();
 
           if (ref) {
             const one = findAgent(ref);
             if (!one) return text(`There is no one here called "${ref}".`);
+            if (!canAct(one)) return outOfRemit(one.name);
             staff = [one];
           }
 
@@ -189,7 +238,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
             (a, b) => totalTokens(b.stats) - totalTokens(a.stats)
           );
 
-          const total = store.state.agents.reduce((n, a) => n + totalTokens(a.stats), 0);
+          const total = staffInRemit().reduce((n, a) => n + totalTokens(a.stats), 0);
 
           const lines = rows.map((a) => {
             const st = a.stats || {};
@@ -269,6 +318,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
         async ({ agent: ref }) => {
           const a = findAgent(ref);
           if (!a) return text(`There is no one here called "${ref}".`);
+          if (!canAct(a)) return outOfRemit(a.name);
 
           const dept = store.department(a.departmentId);
           const sup = a.supervisorId ? store.agent(a.supervisorId) : null;
@@ -322,13 +372,22 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           justification: z.string().describe('Why this hire is needed, in one or two sentences.'),
         },
         async (args) => {
-          const dept = findDepartment(args.department);
+          // A head of department hires into their own department, whatever
+          // they named — there is nowhere else they could put someone.
+          const dept = officeWide ? findDepartment(args.department) : myDepartment();
           if (!dept) return text(`There is no department called "${args.department}".`);
+          if (!officeWide && args.department && findDepartment(args.department)?.id !== dept.id) {
+            return text(
+              `You head ${dept.name}, and may only hire into it. Hiring for another ` +
+                `department is the CEO's to propose.`
+            );
+          }
 
           const sup = args.supervisor ? findAgent(args.supervisor) : null;
           if (args.supervisor && !sup) {
             return text(`There is no one called "${args.supervisor}" to supervise them.`);
           }
+          if (sup && !canAct(sup)) return outOfRemit(sup.name);
 
           const project = args.project ? findProject(args.project) : null;
           if (args.project && !project) {
@@ -378,8 +437,14 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           seats: z.number().optional().describe('Number of desks. Default 6.'),
           justification: z.string(),
         },
-        async (args) =>
-          propose(
+        async (args) => {
+          if (!officeWide) {
+            return text(
+              `Opening a department is not yours to propose — you head ${remit()}. ` +
+                `Put it to the CEO.`
+            );
+          }
+          return propose(
             agentId,
             {
               title: `Open a new department: ${args.name}`,
@@ -395,7 +460,8 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
               if (!result.ok) return result;
               return { ok: true, summary: `${result.department.name} is open.` };
             }
-          )
+          );
+        }
       ),
 
       tool(
@@ -412,6 +478,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
         async (args) => {
           const who = findAgent(args.agent);
           if (!who) return text(`There is no one here called "${args.agent}".`);
+          if (!canAct(who)) return outOfRemit(who.name);
 
           const patch = {};
           const changes = [];
@@ -425,12 +492,21 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           if (args.department) {
             const d = findDepartment(args.department);
             if (!d) return text(`There is no department called "${args.department}".`);
+            // Moving someone out lands them on another head's floor, which is
+            // that head's business and the CEO's to settle.
+            if (!officeWide && d.id !== departmentId) {
+              return text(
+                `Moving ${who.name} out of ${remit()} is not yours to propose — it ` +
+                  `puts them under another head. Put it to the CEO.`
+              );
+            }
             patch.departmentId = d.id;
             changes.push(`moved to ${d.name}`);
           }
           if (args.supervisor) {
             const s = findAgent(args.supervisor);
             if (!s) return text(`There is no one called "${args.supervisor}".`);
+            if (!canAct(s)) return outOfRemit(s.name);
             patch.supervisorId = s.id;
             changes.push(`now reports to ${s.name}`);
           }
@@ -471,6 +547,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
         async (args) => {
           const who = findAgent(args.agent);
           if (!who) return text(`There is no one here called "${args.agent}".`);
+          if (!canAct(who)) return outOfRemit(who.name);
           if (args.enabled && !args.task?.trim()) {
             return text('A standing shift needs a task.');
           }
@@ -540,8 +617,10 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           const everyone =
             refs.length === 1 && /^(all|everyone|all staff)$/i.test(refs[0].trim());
 
+          // "all" means everyone within this agent's remit — the whole office
+          // for the CEO, this department for the head who runs it.
           const targets = everyone
-            ? store.state.agents.filter((a) => !a.isCeo && a.id !== agentId)
+            ? staffInRemit().filter((a) => !a.isCeo && a.id !== agentId)
             : refs.map((r) => ({ ref: r, agent: findAgent(r) }));
 
           if (!everyone) {
@@ -549,6 +628,8 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
             if (missing.length) {
               return text(`There is no one here called: ${missing.join(', ')}.`);
             }
+            const beyond = targets.filter((t) => !canAct(t.agent)).map((t) => t.agent.name);
+            if (beyond.length) return outOfRemit(beyond.join(', '));
           }
 
           const list = everyone ? targets : targets.map((t) => t.agent);

@@ -165,6 +165,34 @@ export function buildPersona(agentId) {
     `a running commentary.`;
   p += section('The Instruments of the Office', toolsDoc);
 
+  const headsDepartment = dept && dept.headAgentId === agentId;
+
+  // A head of department runs their own floor: the same instruments, reaching
+  // their department and no further.
+  if (headsDepartment && !agent.canManageOffice) {
+    p += section(
+      `Running ${dept.name}`,
+      `You do not merely work in ${dept.name} — you run it, and you have the ` +
+        `instruments to do so under the \`hq\` MCP server. They reach your own ` +
+        `department and nowhere else:\n\n` +
+        `- \`mcp__hq__office_report\` — the state of your department.\n` +
+        `- \`mcp__hq__staff_ledger\` — what each of your staff has used and delivered.\n` +
+        `- \`mcp__hq__describe_staff\` — one of your people in full.\n` +
+        `- \`mcp__hq__project_status\` — how the work stands.\n` +
+        `- \`mcp__hq__propose_hire\` — engage someone new **into your department** when ` +
+        `the work needs a hand you do not have.\n` +
+        `- \`mcp__hq__propose_reassignment\` — move your people between projects.\n` +
+        `- \`mcp__hq__propose_shift\` — put one of yours on a standing shift.\n` +
+        `- \`mcp__hq__propose_dismissal\` — let one of yours go.\n\n` +
+        `Every \`propose_\` instrument asks for sanction and blocks until the answer ` +
+        `comes; routine departmental matters go to the CEO, grave ones to ${lord}. ` +
+        `You may propose, not decree.\n\n` +
+        `Anything outside ${dept.name} — another department's staff, opening a new ` +
+        `department, moving one of your people out from under you — is the CEO's to ` +
+        `settle. Write to them rather than reaching for it yourself.`
+    );
+  }
+
   if (agent.canManageOffice) {
     p += section(
       'The Management Instruments',

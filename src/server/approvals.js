@@ -37,11 +37,15 @@ function routeFor(agent, { severity, kind }) {
   const policy = agent.approvalPolicy || {};
   const setting = kind === 'tool' ? policy.tools : policy.decisions;
 
+  // A grave matter is reserved to Lord Marcos whatever the standing policy
+  // says. This check comes first deliberately: an agent set to decide for
+  // itself would otherwise dismiss staff, or spend money, with nobody asked.
+  if (severity === 'grave') return 'lord';
+
   if (setting === 'auto') return 'auto';
   if (setting === 'lord') return 'lord';
   // The CEO cannot approve their own work; they answer to the Lord.
   if (agent.isCeo) return 'lord';
-  if (severity === 'grave') return 'lord';
   return 'ceo';
 }
 
