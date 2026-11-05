@@ -12,10 +12,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-import { store, newId, LOGS_DIR } from './store.js';
+import { store, newId, emptyStats, LOGS_DIR } from './store.js';
 import { bus } from './bus.js';
 import { buildPersona } from './persona.js';
 import { buildOfficeServer, setMessageDeliverer } from './office-tools.js';
+import { buildHqServer } from './hq-tools.js';
 import {
   requestApproval,
   setCeoAdjudicator,
@@ -119,6 +120,33 @@ export class AgentWorker {
     return entry;
   }
 
+  /**
+   * Keep the agent's ledger. This is what lets the office answer "who is
+   * costing me money" without anyone having to guess.
+   */
+  recordCost(message, ok) {
+    const agent = this.agent;
+    if (!agent) return;
+
+    const stats = (agent.stats ??= emptyStats());
+    stats.totalCostUsd += Number(message.total_cost_usd) || 0;
+    stats.turns += Number(message.num_turns) || 0;
+    stats.durationMs += Number(message.duration_ms) || 0;
+    stats.tasks += 1;
+    if (!ok) stats.errors += 1;
+    stats.lastActiveAt = Date.now();
+
+    const usage = message.usage || {};
+    stats.inputTokens +=
+      (Number(usage.input_tokens) || 0) +
+      (Number(usage.cache_read_input_tokens) || 0) +
+      (Number(usage.cache_creation_input_tokens) || 0);
+    stats.outputTokens += Number(usage.output_tokens) || 0;
+
+    store.save();
+    bus.emitEvent('agent.stats', { agentId: this.agentId, stats });
+  }
+
   /** Where this agent works. Falls back to the home directory. */
   resolveCwd() {
     const agent = this.agent;
@@ -138,6 +166,12 @@ export class AgentWorker {
     // MCP servers: the office's own instruments, plus whatever Lord Marcos
     // has enabled for this particular agent.
     const mcpServers = { office: buildOfficeServer(this.agentId) };
+
+    // Only staff trusted to run the company get the management instruments.
+    if (agent.canManageOffice) {
+      mcpServers.hq = buildHqServer(this.agentId, { workerStates: allWorkerStates });
+    }
+
     for (const name of agent.enabledMcpServers || []) {
       const entry = (store.state.components.mcpServers || []).find((m) => m.name === name);
       if (entry?.config) mcpServers[name] = entry.config;
@@ -186,9 +220,7 @@ export class AgentWorker {
    * Returns null when the office does not care to be asked.
    */
   async askLeave(toolName, input) {
-    // The office's own instruments are never gated: `request_approval` asking
-    // for approval of itself would deadlock the agent instantly.
-    if (isOfficeTool(toolName)) return null;
+    if (isHouseTool(toolName)) return null;
 
     const policy = this.agent?.approvalPolicy?.tools || 'lord';
     if (policy === 'auto') return null;
@@ -355,6 +387,7 @@ export class AgentWorker {
       case 'result': {
         this.pendingTurns = Math.max(0, this.pendingTurns - 1);
         const ok = message.subtype === 'success';
+        this.recordCost(message, ok);
         this.log('result', ok ? 'Task complete.' : `Task ended: ${message.subtype}`, {
           cost: message.total_cost_usd,
           turns: message.num_turns,
@@ -589,9 +622,28 @@ function isBenignNoise(line) {
   return BENIGN_STDERR.some((pattern) => pattern.test(line));
 }
 
-/** The office's own MCP instruments, which must never need sanction to use. */
-function isOfficeTool(toolName) {
-  return String(toolName || '').startsWith('mcp__office__');
+/**
+ * Tools that only affect the agent's own context and reach nothing outside the
+ * session. Asking Lord Marcos to sanction these spends his attention for
+ * nothing: ToolSearch merely loads tool schemas, TodoWrite is the agent's own
+ * scratch list.
+ */
+const UNGATED_TOOLS = new Set(['ToolSearch', 'TodoWrite']);
+
+/**
+ * Whether a tool bypasses the approval hook.
+ *
+ * `office` tools must: `request_approval` asking for approval of itself would
+ * deadlock the agent instantly. `hq` tools must too: they raise their own
+ * proposal before changing anything, so gating them here would ask twice.
+ */
+function isHouseTool(toolName) {
+  const name = String(toolName || '');
+  return (
+    name.startsWith('mcp__office__') ||
+    name.startsWith('mcp__hq__') ||
+    UNGATED_TOOLS.has(name)
+  );
 }
 
 function safeJson(value) {

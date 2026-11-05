@@ -43,6 +43,12 @@ function timeOf(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+/** Costs here are usually fractions of a cent, so four decimals earn their place. */
+function money(n) {
+  const v = Number(n) || 0;
+  return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
+}
+
 function toast({ title, body = '', kind = 'info', timeout = 6000 }) {
   const el = h('div.toast', { 'data-kind': kind }, [
     h('div.toast-title', { text: title }),
@@ -215,6 +221,15 @@ async function handleEvent({ type, data }) {
       break;
     }
 
+    case 'agent.stats': {
+      const agent = agentById(data.agentId);
+      if (agent) agent.stats = data.stats;
+      if (state.panel === 'agent' || state.panel === 'hq' || state.panel === 'staff') {
+        renderPanel();
+      }
+      break;
+    }
+
     case 'visitors':
       if (state.snapshot) state.snapshot.visitors = data;
       map.visitors = data;
@@ -352,11 +367,18 @@ function renderAgentPanel() {
     h('div.card-head', {}, [
       portrait(agent),
       h('div', { style: { flex: '1', minWidth: '0' } }, [
-        h('div.card-title', { text: `${agent.name}${agent.isCeo ? ' ♛' : ''}` }),
+        h('div.card-title', {
+          text: `${agent.name}${agent.isCeo ? ' ♛' : ''}${agent.canManageOffice ? ' ⚙' : ''}`,
+        }),
         h('div.card-sub', {
           text: `${agent.title} · ${dept?.name || 'unassigned'}${
             supervisor ? ` · reports to ${supervisor.name}` : ''
           }`,
+        }),
+        h('div.card-sub', {
+          text:
+            `${money(agent.stats?.totalCostUsd)} over ${agent.stats?.tasks || 0} task(s)` +
+            `${agent.stats?.errors ? ` · ${agent.stats.errors} failure(s)` : ''}`,
         }),
       ]),
       h('span.pill.pill-status', {
@@ -571,6 +593,7 @@ function renderAgentConfig(container, agent) {
       supervisorId: form.supervisorId.value || null,
       projectId: form.projectId.value || null,
       memoryEnabled: form.memoryEnabled.checked,
+      canManageOffice: form.canManageOffice.checked,
       approvalPolicy: {
         tools: form.policyTools.value,
         decisions: form.policyDecisions.value,
@@ -696,6 +719,22 @@ function renderAgentConfig(container, agent) {
       ]),
     ]),
 
+    h('label.toggle', {}, [
+      (form.canManageOffice = h('input', {
+        type: 'checkbox',
+        checked: agent.canManageOffice ? true : null,
+      })),
+      h('div', {}, [
+        h('div.toggle-name', { text: 'May manage the office ⚙' }),
+        h('div.toggle-desc', {
+          text:
+            'Grants the hq instruments: read the whole company, account for what every ' +
+            'agent costs, report project status, and propose hires, reassignments, ' +
+            'shifts and dismissals. Every change still needs your sanction.',
+        }),
+      ]),
+    ]),
+
     h('h4', { text: 'Standing shift', style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
 
     h('label.toggle', {}, [
@@ -791,6 +830,8 @@ function renderHqPanel() {
       }),
     ]),
 
+    ledgerCard(),
+
     h('h4', { text: `Awaiting sanction (${approvals.length})`, style: { margin: '16px 0 8px', color: 'var(--gold)' } }),
     approvals.length
       ? h('div', {}, approvals.map((a) => approvalCard(a)))
@@ -830,6 +871,54 @@ function renderHqPanel() {
           ]);
         }))
       : h('div.empty', { text: 'The staff have not written to each other yet.' }),
+  ]);
+}
+
+/** What the office has spent, and on whom. */
+function ledgerCard() {
+  const agents = state.snapshot.agents;
+  const total = agents.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+  const spenders = agents
+    .filter((a) => (a.stats?.totalCostUsd || 0) > 0)
+    .sort((a, b) => (b.stats.totalCostUsd || 0) - (a.stats.totalCostUsd || 0));
+
+  return h('div.card', {}, [
+    h('div.card-head', {}, [
+      h('div.card-title', { text: 'The ledger', style: { flex: '1' } }),
+      h('span.pill', { text: money(total) }),
+    ]),
+    spenders.length
+      ? h(
+          'div',
+          {},
+          spenders.slice(0, 8).map((a) => {
+            const share = total > 0 ? ((a.stats.totalCostUsd || 0) / total) * 100 : 0;
+            return h('div', { style: { marginTop: '7px' } }, [
+              h('div.card-sub', {
+                text:
+                  `${a.name} — ${money(a.stats.totalCostUsd)} (${share.toFixed(0)}%) · ` +
+                  `${a.stats.tasks || 0} task(s) · ${a.model}`,
+              }),
+              // A bar is the fastest read on who is eating the budget.
+              h('div', {
+                style: {
+                  height: '4px',
+                  marginTop: '2px',
+                  background: 'var(--panel-3)',
+                },
+              }, [
+                h('div', {
+                  style: {
+                    height: '4px',
+                    width: `${Math.max(2, share)}%`,
+                    background: share > 50 ? 'var(--amber)' : 'var(--blue)',
+                  },
+                }),
+              ]),
+            ]);
+          })
+        )
+      : h('div.card-sub', { text: 'Nothing spent yet.' }),
   ]);
 }
 
@@ -898,8 +987,13 @@ function renderStaffPanel() {
       h('div.card-head', {}, [
         portrait(agent),
         h('div', { style: { flex: '1', minWidth: '0' } }, [
-          h('div.card-title', { text: `${agent.name}${agent.isCeo ? ' ♛' : ''}` }),
+          h('div.card-title', {
+            text: `${agent.name}${agent.isCeo ? ' ♛' : ''}${agent.canManageOffice ? ' ⚙' : ''}`,
+          }),
           h('div.card-sub', { text: `${agent.title} · ${dept?.name || '—'}` }),
+          h('div.card-sub', {
+            text: `${money(agent.stats?.totalCostUsd)} · ${agent.stats?.tasks || 0} task(s)`,
+          }),
         ]),
         h('span.pill.pill-status', {
           text: status,
@@ -922,6 +1016,27 @@ function renderStaffPanel() {
   });
 
   setPanel('STAFF', [
+    // A one-CEO office is not much of an office; offer to staff it.
+    state.snapshot.agents.length < 3 &&
+      h('div.card', {}, [
+        h('div.card-title', { text: 'This office is nearly empty' }),
+        h('div.card-sub', {
+          text:
+            'Open Operations, Engineering and Research, each staffed and with its own ' +
+            'context. Operations gets the management instruments, so you can ask them ' +
+            'about the company itself. Nothing existing is touched.',
+        }),
+        h('div.actions', {}, [
+          h('button.btn.btn-gold.btn-sm', {
+            text: 'Staff the office',
+            onclick: async () => {
+              await guard(() => api.seed(), 'The office is staffed.');
+              map.fit();
+            },
+          }),
+        ]),
+      ]),
+
     h('div.actions', { style: { marginBottom: '12px' } }, [
       h('button.btn.btn-gold', { text: '+ Hire someone', onclick: openHireForm }),
       h('button.btn.btn-sm', {

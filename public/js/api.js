@@ -24,6 +24,7 @@ export const api = {
   state: () => request('GET', '/api/state'),
 
   office: (patch) => request('PATCH', '/api/office', patch),
+  seed: () => request('POST', '/api/office/seed'),
 
   createDepartment: (body) => request('POST', '/api/departments', body),
   updateDepartment: (id, patch) => request('PATCH', `/api/departments/${id}`, patch),
@@ -88,7 +89,7 @@ export function connectEvents(onEvent, onStatusChange) {
     // The server names every event, so listen broadly.
     for (const type of [
       'agent.status', 'agent.activity', 'agent.created', 'agent.updated',
-      'agent.deleted', 'agent.memory', 'agent.shift',
+      'agent.deleted', 'agent.memory', 'agent.shift', 'agent.stats',
       'department.created', 'department.updated', 'department.deleted',
       'project.created', 'project.updated', 'project.deleted',
       'approval.new', 'approval.decided', 'approval.escalated', 'approval.ceo-ruling',

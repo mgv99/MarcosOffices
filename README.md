@@ -97,6 +97,31 @@ Every agent gets an in-process MCP server, `mcp__office__*`:
 | `roster` | who works here and what they do |
 | `petition_lord` | send word directly to you |
 
+### The management instruments
+
+Agents flagged **may manage the office** get a second toolset, `mcp__hq__*` — the
+office can run itself. Ask the Chief of Staff how the company is doing and they
+answer from the instruments, not from memory:
+
+| Tool | What it does |
+| --- | --- |
+| `office_report` | the whole company: departments, staff, spend, projects, outstanding business |
+| `staff_ledger` | what each agent has cost, their share of the budget, cost per task |
+| `project_status` | how a project stands, who is posted to it, what the directory holds |
+| `describe_staff` | one agent in full — context, permissions, chain of command |
+| `propose_hire` | engage someone new for a task or project |
+| `propose_department` | open a department |
+| `propose_reassignment` | move someone between projects, departments or supervisors |
+| `propose_shift` | put someone on a standing shift, or take them off |
+| `propose_dismissal` | let someone go — grave, always goes to you |
+
+Every `propose_` instrument raises an approval and **blocks until it is answered**.
+An agent may propose to hire; it may not hire unsanctioned.
+
+Cost is recorded per agent as each task completes, so "is anyone consuming too much"
+is a question the office can actually answer. Their standing instruction is to weigh
+cost against what was delivered, and to say which they mean.
+
 ### How the approval gate actually works
 
 This is the one genuinely subtle thing in the codebase, and it is worth knowing before
@@ -111,8 +136,14 @@ The office therefore gates with a **`PreToolUse` hook**, which fires for every t
 before permission rules are consulted. `canUseTool` is kept only as a second line of
 defence.
 
-One consequence: the office's own `mcp__office__*` tools are explicitly exempt. Gating
-`request_approval` behind an approval would deadlock the agent against itself.
+Three things are exempt, deliberately:
+
+- `mcp__office__*` — gating `request_approval` behind an approval would deadlock the
+  agent against itself.
+- `mcp__hq__*` — the mutating ones already raise their own proposal, so gating them
+  here would ask you twice for the same change.
+- `ToolSearch` and `TodoWrite` — they reach nothing outside the session, and asking
+  you to sanction them spends your attention for nothing.
 
 ---
 
@@ -139,6 +170,18 @@ their session's working directory. They may still read elsewhere when the work
 genuinely requires it.
 
 ---
+
+## Staffing a new office
+
+A fresh office opens with nothing but a CEO. **Staff → "Staff the office"** opens three
+departments, each with its own context and staff:
+
+- **Operations** — Prefect (Chief of Staff) and Ledger (Accountant), both holding the
+  management instruments. This is who you ask about the company itself.
+- **Engineering** — Vulcan (Principal), Faber (Build), Tessera (Quality).
+- **Research** — Minerva (Head of Research), Quill (Analyst).
+
+It is additive and idempotent by name: anything already there is left alone.
 
 ## Requirements
 

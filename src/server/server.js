@@ -38,6 +38,15 @@ import {
 } from './discovery.js';
 import { startScheduler } from './scheduler.js';
 import { postMessage } from './office-tools.js';
+import {
+  createAgent,
+  updateAgent,
+  deleteAgent,
+  createDepartment,
+  deleteDepartment,
+  seedOffice,
+  clamp,
+} from './operations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '..', '..', 'public');
@@ -178,25 +187,18 @@ route('PATCH', /^\/api\/office$/, async (req, res) => {
   ok(res, store.state.office);
 });
 
+/** Staff an empty office with a sensible starting company. */
+route('POST', /^\/api\/office\/seed$/, async (req, res) => {
+  const result = seedOffice();
+  ok(res, result);
+});
+
 // --- departments ----------------------------------------------------------
 
 route('POST', /^\/api\/departments$/, async (req, res) => {
-  const body = await readBody(req);
-  if (!body.name?.trim()) return fail(res, 400, 'a department needs a name');
-
-  const dept = {
-    id: newId('dep_'),
-    name: body.name.trim(),
-    context: body.context || '',
-    seats: clamp(Number(body.seats) || 4, 1, 24),
-    theme: body.theme || 'default',
-    headAgentId: null,
-    ...placeDepartment(body),
-  };
-  store.state.departments.push(dept);
-  store.save();
-  bus.emitEvent('department.created', dept);
-  ok(res, dept);
+  const result = createDepartment(await readBody(req));
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, result.department);
 });
 
 route('PATCH', /^\/api\/departments\/([\w]+)$/, async (req, res, [id]) => {
@@ -204,143 +206,59 @@ route('PATCH', /^\/api\/departments\/([\w]+)$/, async (req, res, [id]) => {
   if (!dept) return fail(res, 404, 'no such department');
 
   const patch = await readBody(req);
+
+  if (patch.seats != null) {
+    const seats = clamp(Number(patch.seats) || 1, 1, 24);
+    // Removing a desk somebody is sitting at would strand them off the map.
+    const highestOccupied = store.state.agents
+      .filter((a) => a.departmentId === id)
+      .reduce((max, a) => Math.max(max, a.seat), -1);
+    if (seats <= highestOccupied) {
+      return fail(
+        res,
+        409,
+        `Desk ${highestOccupied} is occupied. Reassign that member of staff before shrinking ${dept.name}.`
+      );
+    }
+    dept.seats = seats;
+  }
+
   Object.assign(dept, pick(patch, ['name', 'context', 'theme', 'headAgentId', 'x', 'y', 'w', 'h']));
-  if (patch.seats != null) dept.seats = clamp(Number(patch.seats) || 1, 1, 24);
   store.save();
   bus.emitEvent('department.updated', dept);
   ok(res, dept);
 });
 
 route('DELETE', /^\/api\/departments\/([\w]+)$/, async (req, res, [id]) => {
-  const dept = store.department(id);
-  if (!dept) return fail(res, 404, 'no such department');
-
-  const staff = store.state.agents.filter((a) => a.departmentId === id);
-  if (staff.length) {
-    return fail(
-      res,
-      409,
-      `${dept.name} still has ${staff.length} member(s) of staff. Reassign or dismiss them first.`
-    );
-  }
-  store.state.departments = store.state.departments.filter((d) => d.id !== id);
-  store.save();
-  bus.emitEvent('department.deleted', { id });
+  const result = deleteDepartment(id);
+  if (!result.ok) return fail(res, 409, result.error);
   ok(res);
 });
 
 // --- agents ---------------------------------------------------------------
 
 route('POST', /^\/api\/agents$/, async (req, res) => {
-  const body = await readBody(req);
-  if (!body.name?.trim()) return fail(res, 400, 'an agent needs a name');
-
-  const dept = store.department(body.departmentId);
-  if (!dept) return fail(res, 400, 'assign the agent to a real department');
-
-  const taken = new Set(
-    store.state.agents.filter((a) => a.departmentId === dept.id).map((a) => a.seat)
-  );
-  let seat = 0;
-  while (taken.has(seat)) seat++;
-  if (seat >= dept.seats) {
-    return fail(res, 409, `${dept.name} has no free desks. Add seats to the department first.`);
-  }
-
-  const agent = {
-    id: newId('agt_'),
-    name: body.name.trim(),
-    title: body.title?.trim() || 'Associate',
-    departmentId: dept.id,
-    seat,
-    supervisorId: body.supervisorId || store.state.office.ceoAgentId || null,
-    isCeo: false,
-    context: body.context || '',
-    briefing: body.briefing || '',
-    model: body.model || 'sonnet',
-    effort: body.effort || 'medium',
-    permissionMode: body.permissionMode || 'default',
-    approvalPolicy: body.approvalPolicy || { tools: 'lord', decisions: 'ceo' },
-    allowedTools: body.allowedTools || [],
-    disallowedTools: body.disallowedTools || [],
-    enabledSkills: body.enabledSkills || [],
-    enabledMcpServers: body.enabledMcpServers || [],
-    projectId: body.projectId || null,
-    extraDirs: body.extraDirs || [],
-    memoryEnabled: body.memoryEnabled !== false,
-    loop: body.loop || { enabled: false, intervalMinutes: 30, prompt: '' },
-    appearance: body.appearance || { seed: newId(), outfit: 'shirt' },
-    createdAt: Date.now(),
-    lastSessionId: null,
-  };
-
-  store.state.agents.push(agent);
-  store.save();
-  bus.emitEvent('agent.created', agent);
-  ok(res, agent);
+  const result = createAgent(await readBody(req));
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, result.agent);
 });
 
 route('PATCH', /^\/api\/agents\/([\w]+)$/, async (req, res, [id]) => {
-  const agent = store.agent(id);
-  if (!agent) return fail(res, 404, 'no such agent');
-
-  const patch = await readBody(req);
-
-  if (patch.supervisorId !== undefined) {
-    if (patch.supervisorId === id) return fail(res, 400, 'an agent cannot supervise themselves');
-    if (patch.supervisorId && createsCycle(id, patch.supervisorId)) {
-      return fail(res, 400, 'that would create a loop in the chain of command');
-    }
-  }
-
-  if (patch.departmentId && patch.departmentId !== agent.departmentId) {
-    const dept = store.department(patch.departmentId);
-    if (!dept) return fail(res, 400, 'no such department');
-    const taken = new Set(
-      store.state.agents
-        .filter((a) => a.departmentId === dept.id && a.id !== id)
-        .map((a) => a.seat)
-    );
-    let seat = 0;
-    while (taken.has(seat)) seat++;
-    if (seat >= dept.seats) return fail(res, 409, `${dept.name} has no free desks.`);
-    agent.seat = seat;
-  }
-
-  Object.assign(
-    agent,
-    pick(patch, [
-      'name', 'title', 'departmentId', 'seat', 'supervisorId', 'context', 'briefing',
-      'model', 'effort', 'permissionMode', 'approvalPolicy', 'allowedTools',
-      'disallowedTools', 'enabledSkills', 'enabledMcpServers', 'projectId',
-      'extraDirs', 'memoryEnabled', 'loop', 'appearance',
-    ])
-  );
-
-  store.save();
-  bus.emitEvent('agent.updated', agent);
+  const result = updateAgent(id, await readBody(req));
+  if (!result.ok) return fail(res, 400, result.error);
 
   const live = workerState(id);
   ok(res, {
-    agent,
+    agent: result.agent,
     // Configuration is baked into the session at start-up.
     restartRequired: live.status !== 'offline',
   });
 });
 
 route('DELETE', /^\/api\/agents\/([\w]+)$/, async (req, res, [id]) => {
-  const agent = store.agent(id);
-  if (!agent) return fail(res, 404, 'no such agent');
-  if (agent.isCeo) return fail(res, 400, 'the CEO cannot be dismissed; appoint a successor first');
-
   await dismiss(id);
-  store.state.agents = store.state.agents.filter((a) => a.id !== id);
-  // Anyone who reported to them now reports to the CEO.
-  for (const other of store.state.agents) {
-    if (other.supervisorId === id) other.supervisorId = store.state.office.ceoAgentId;
-  }
-  store.save();
-  bus.emitEvent('agent.deleted', { id });
+  const result = deleteAgent(id);
+  if (!result.ok) return fail(res, 400, result.error);
   ok(res);
 });
 
@@ -573,44 +491,6 @@ function pick(source, keys) {
   const out = {};
   for (const key of keys) if (source[key] !== undefined) out[key] = source[key];
   return out;
-}
-
-function clamp(value, lo, hi) {
-  return Math.max(lo, Math.min(hi, value));
-}
-
-/** Would making `supervisorId` the boss of `agentId` close a loop? */
-function createsCycle(agentId, supervisorId) {
-  const seen = new Set([agentId]);
-  let cursor = store.agent(supervisorId);
-  while (cursor) {
-    if (seen.has(cursor.id)) return true;
-    seen.add(cursor.id);
-    cursor = cursor.supervisorId ? store.agent(cursor.supervisorId) : null;
-  }
-  return false;
-}
-
-/** Find an unoccupied patch of floor for a new department. */
-function placeDepartment(body) {
-  if (Number.isFinite(body.x) && Number.isFinite(body.y)) {
-    return { x: body.x, y: body.y, w: body.w || 14, h: body.h || 10 };
-  }
-  const w = body.w || 14;
-  const h = body.h || 10;
-  const gap = 2;
-
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 6; col++) {
-      const x = 2 + col * (w + gap);
-      const y = 2 + row * (h + gap);
-      const clash = store.state.departments.some(
-        (d) => x < d.x + d.w + gap && x + w + gap > d.x && y < d.y + d.h + gap && y + h + gap > d.y
-      );
-      if (!clash) return { x, y, w, h };
-    }
-  }
-  return { x: 2, y: 2 + store.state.departments.length * (h + gap), w, h };
 }
 
 // --- server ---------------------------------------------------------------

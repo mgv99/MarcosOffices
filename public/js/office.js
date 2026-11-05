@@ -25,7 +25,6 @@ import {
 } from './sprites.js';
 
 const ZOOM_LEVELS = [2, 3, 4, 5, 6];
-const VISITOR_ROW_Y = -6; // tiles above the office proper
 
 export class OfficeMap {
   constructor(canvas, { onSelectAgent, onSelectDepartment, onBackground } = {}) {
@@ -274,13 +273,24 @@ export class OfficeMap {
     }
   }
 
+  /**
+   * Where the lobby sits: below every department, so visitors never collide
+   * with the rooms or with the toolbar floating over the top-left.
+   */
+  _lobbyOrigin() {
+    const depts = this.state?.departments || [];
+    if (!depts.length) return { x: 2 * TILE, y: 2 * TILE };
+    const left = Math.min(...depts.map((d) => d.x));
+    const bottom = Math.max(...depts.map((d) => d.y + d.h));
+    return { x: left * TILE, y: (bottom + 3) * TILE };
+  }
+
   /** Sessions Lord Marcos started himself, loitering in the lobby. */
   _drawVisitors() {
     const { ctx } = this;
     if (!this.visitors.length) return;
 
-    const startX = 2 * TILE;
-    const y = VISITOR_ROW_Y * TILE;
+    const { x: startX, y } = this._lobbyOrigin();
 
     this.visitors.forEach((visitor, i) => {
       const x = startX + i * TILE * 3;
@@ -361,7 +371,8 @@ export class OfficeMap {
     }
 
     if (this.visitors.length) {
-      const p = toScreen(2 * TILE, (VISITOR_ROW_Y - 1) * TILE);
+      const lobby = this._lobbyOrigin();
+      const p = toScreen(lobby.x, lobby.y - TILE);
       ctx.textAlign = 'left';
       ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
       ctx.fillStyle = '#7f8da3';
@@ -472,6 +483,10 @@ export class OfficeMap {
     if (!this.state?.departments.length) return;
     const xs = this.state.departments.flatMap((d) => [d.x, d.x + d.w]);
     const ys = this.state.departments.flatMap((d) => [d.y, d.y + d.h]);
+    // Keep the lobby in shot so visiting sessions are not stranded off-screen.
+    if (this.visitors.length) ys.push(Math.max(...ys) + 5);
+    // Room name plates hang above the top row; leave them somewhere to sit.
+    ys.push(Math.min(...ys) - 2);
     this.camera.x = ((Math.min(...xs) + Math.max(...xs)) / 2) * TILE;
     this.camera.y = ((Math.min(...ys) + Math.max(...ys)) / 2) * TILE;
 

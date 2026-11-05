@@ -32,6 +32,21 @@ export const LORD_TITLES = [
   'He Who Is All-Powerful, All-Present and Eternal',
 ];
 
+/** What every agent's ledger starts at. */
+export function emptyStats() {
+  return {
+    totalCostUsd: 0,
+    turns: 0,
+    tasks: 0,
+    errors: 0,
+    durationMs: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    sessions: 0,
+    lastActiveAt: null,
+  };
+}
+
 function defaultState() {
   const ceoId = newId('agt_');
   const execDeptId = newId('dep_');
@@ -99,6 +114,9 @@ function defaultState() {
         memoryEnabled: true,
         loop: { enabled: false, intervalMinutes: 30, prompt: '' },
         appearance: { seed: 'aurelius', outfit: 'suit' },
+        // The CEO may inspect and reshape the office itself.
+        canManageOffice: true,
+        stats: emptyStats(),
         createdAt: Date.now(),
         lastSessionId: null,
       },
@@ -175,6 +193,8 @@ class Store {
       if (a.permissionMode === 'manual') a.permissionMode = 'default';
       a.permissionMode ??= 'default';
       a.memoryEnabled ??= true;
+      a.canManageOffice ??= false;
+      a.stats ??= emptyStats();
     }
   }
 
