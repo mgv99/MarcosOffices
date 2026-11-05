@@ -212,13 +212,15 @@ body.resizing iframe, body.resizing canvas { pointer-events: none; }
 }
 
 .agent-subhead {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin-bottom: 10px; padding-bottom: 10px;
   border-bottom: 2px solid var(--line);
 }
-.agent-facts { font-size: 11px; color: var(--muted); min-width: 0; }
+/* The facts take the slack so the controls and status keep their size. */
+.agent-facts { font-size: 11px; color: var(--muted); min-width: 0; flex: 1; }
 
-.agent-controls { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.agent-controls { display: flex; gap: 5px; flex-wrap: wrap; }
+.agent-subhead > .pill-status { flex: none; }
 
 .side-body { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
 
@@ -336,6 +338,22 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
 
 .order-box { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .order-box textarea { min-height: 76px; }
+
+/* A square send button, sitting at the foot of the box beside it. */
+.order-line { display: flex; gap: 8px; align-items: flex-end; }
+.order-line textarea { flex: 1; min-width: 0; }
+
+.order-send {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .lord-note {
   font-size: 11px; color: var(--gold); opacity: .85;
   border-left: 3px solid var(--gold); padding-left: 8px; margin-bottom: 10px; line-height: 1.5;

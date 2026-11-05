@@ -88,6 +88,9 @@ const state = {
   agentTab: 'orders',
   activity: [], // for the open agent
   todos: [], // their current task list
+  // Unsent order text, per agent. The panel re-renders whenever an agent's
+  // status changes, which would otherwise throw away what you were typing.
+  drafts: {},
 };
 
 let map = null;
@@ -322,9 +325,9 @@ async function handleEvent({ type, data }) {
         };
         map.setWorkers(state.snapshot.workers);
       }
-      if (state.panel === 'agent' && state.selectedAgentId === data.agentId) {
-        renderPanel();
-      }
+      // Only the status strip changes, so leave the rest of the panel — and
+      // the reader's scroll position and half-typed order — alone.
+      refreshAgentSubhead(data.agentId);
       syncAgentWindow(data.agentId);
       break;
     }
@@ -552,45 +555,7 @@ function renderAgentPanel() {
     }),
   ]);
 
-  const stats = agent.stats || {};
-  const header = h('div.agent-subhead', {}, [
-    h('span.agent-facts', {
-      text:
-        `${dept?.name || 'unassigned'} · ${money(stats.totalCostUsd)} over ` +
-        `${stats.tasks || 0} task(s)` +
-        `${stats.errors ? ` · ${stats.errors} failure(s)` : ''}` +
-        `${supervisor ? ` · reports to ${supervisor.name}` : ''}`,
-    }),
-    h('span.spacer'),
-    h('span.pill.pill-status', {
-      text: status,
-      style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
-    }),
-  ]);
-
-  const controls = h('div.agent-controls', {}, [
-    status === 'offline' || status === 'error'
-      ? h('button.btn.btn-primary.btn-sm', {
-          text: '▶ Call to duty',
-          onclick: () => guard(() => api.hire(agent.id), 'Reporting for duty…'),
-        })
-      : h('button.btn.btn-danger.btn-sm', {
-          text: '■ Send home',
-          onclick: () => guard(() => api.dismiss(agent.id), 'Sent home.'),
-        }),
-    status === 'working' &&
-      h('button.btn.btn-sm', {
-        text: '⏸ Interrupt',
-        onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
-      }),
-    h('button.btn.btn-sm', { text: '⌖ Find', onclick: () => map.focusAgent(agent.id) }),
-    h('button.btn.btn-sm', {
-      text: '⧉ Pop out',
-      title: 'Open a floating console, so you can watch several agents at once',
-      onclick: () => openAgentWindow(agent.id),
-    }),
-  ]);
-
+  const header = buildAgentSubhead(agent);
   const body = h('div.panel-content');
   const nav = tabs(
     [
@@ -607,7 +572,7 @@ function renderAgentPanel() {
     }
   );
 
-  setPanel(heading, [header, controls, nav, body]);
+  setPanel(heading, [header, nav, body]);
   // The Orders tab manages its own scrolling so the order box can sit at the
   // bottom; every other tab scrolls as a normal document.
   $('#side-body').dataset.layout = state.agentTab === 'orders' ? 'console' : 'scroll';
@@ -617,6 +582,82 @@ function renderAgentPanel() {
   else if (state.agentTab === 'mail') renderAgentMail(body, agent);
   else if (state.agentTab === 'config') renderAgentConfig(body, agent);
   else renderAgentMemory(body, agent);
+}
+
+/**
+ * The line of facts and controls under an agent's name.
+ *
+ * Built separately so a status change can refresh just this strip instead of
+ * the whole panel — a full re-render would throw away the reader's scroll
+ * position and whatever they were part-way through typing.
+ */
+function buildAgentSubhead(agent) {
+  const status = statusOf(agent.id);
+  const dept = deptById(agent.departmentId);
+  const supervisor = agent.supervisorId ? agentById(agent.supervisorId) : null;
+  const stats = agent.stats || {};
+
+  return h('div.agent-subhead', {}, [
+    h('span.agent-facts', {
+      text:
+        `${dept?.name || 'unassigned'} · ${money(stats.totalCostUsd)} over ` +
+        `${stats.tasks || 0} task(s)` +
+        `${stats.errors ? ` · ${stats.errors} failure(s)` : ''}` +
+        `${supervisor ? ` · reports to ${supervisor.name}` : ''}`,
+    }),
+
+    h('span.agent-controls', {}, [
+      status === 'offline' || status === 'error'
+        ? h('button.btn.btn-primary.btn-sm', {
+            text: '▶ Call to duty',
+            onclick: () => guard(() => api.hire(agent.id), 'Reporting for duty…'),
+          })
+        : h('button.btn.btn-danger.btn-sm', {
+            text: '■ Send home',
+            onclick: () => guard(() => api.dismiss(agent.id), 'Sent home.'),
+          }),
+      status === 'working' &&
+        h('button.btn.btn-sm', {
+          text: '⏸ Interrupt',
+          onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
+        }),
+      h('button.btn.btn-sm', {
+        text: '✦ New session',
+        title: 'Leave this conversation behind and start a fresh one',
+        onclick: async () => {
+          if (
+            !confirm(
+              `Start a fresh conversation for ${agent.name}?\n\n` +
+                `Their current one is kept and can be picked up again from ` +
+                `Configuration. Their memory and standing orders are unaffected.`
+            )
+          ) {
+            return;
+          }
+          await guard(() => api.switchSession(agent.id, null), 'A fresh conversation.');
+        },
+      }),
+      h('button.btn.btn-sm', { text: '⌖ Find', onclick: () => map.focusAgent(agent.id) }),
+      h('button.btn.btn-sm', {
+        text: '⧉ Pop out',
+        title: 'Open a floating console, so you can watch several agents at once',
+        onclick: () => openAgentWindow(agent.id),
+      }),
+    ]),
+
+    h('span.pill.pill-status', {
+      text: status,
+      style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
+    }),
+  ]);
+}
+
+/** Refresh only the facts-and-controls strip for an agent, if it is showing. */
+function refreshAgentSubhead(agentId) {
+  if (state.panel !== 'agent' || state.selectedAgentId !== agentId) return;
+  const agent = agentById(agentId);
+  const existing = $('#side-body')?.querySelector('.agent-subhead');
+  if (agent && existing) existing.replaceWith(buildAgentSubhead(agent));
 }
 
 /**
@@ -805,16 +846,26 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   const input = h('textarea', {
     placeholder: `Speak, and ${agent.name} obeys…`,
     rows: 3,
+    text: state.drafts[agent.id] || '',
+  });
+
+  // Keep what is typed, so a re-render mid-sentence does not lose it.
+  input.addEventListener('input', () => {
+    state.drafts[agent.id] = input.value;
   });
 
   const send = async () => {
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
+    delete state.drafts[agent.id];
     try {
       await api.order(agent.id, text);
     } catch (err) {
       toast({ title: 'The order did not reach them', body: err.message, kind: 'error' });
+      // Give it back rather than swallowing what they wrote.
+      state.drafts[agent.id] = text;
+      input.value = text;
     }
   };
 
@@ -905,12 +956,15 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     scroller,
     h('div.order-box', {}, [
       palette,
-      input,
-      h('div.actions', {}, [
-        h('button.btn.btn-gold.btn-sm', { text: 'Issue order', onclick: send }),
-        h('span.spacer'),
-        h('span.card-sub', {
-          text: commands.length ? `Ctrl+Enter · / for ${commands.length} commands` : 'Ctrl+Enter',
+      h('div.order-line', {}, [
+        input,
+        h('button.btn.btn-gold.order-send', {
+          text: '↑',
+          // The shortcut lives here now rather than as a line of chrome.
+          title: commands.length
+            ? `Issue order (Ctrl+Enter) · type / for ${commands.length} commands`
+            : 'Issue order (Ctrl+Enter)',
+          onclick: send,
         }),
       ]),
     ]),
