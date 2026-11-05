@@ -503,33 +503,95 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
 
       tool(
         'propose_dismissal',
-        'Propose letting a member of staff go. This is grave and goes to Lord Marcos ' +
-          'himself. Their memory and record are destroyed with them.',
+        'Propose letting staff go — one person, several, or the whole roster when ' +
+          'Lord Marcos wants to start afresh. This is grave and goes to him himself. ' +
+          'Their memory and record are destroyed with them.',
         {
-          agent: z.string(),
+          agent: z
+            .string()
+            .optional()
+            .describe('A single member of staff, by name or id.'),
+          agents: z
+            .array(z.string())
+            .optional()
+            .describe(
+              'Several at once, by name or id. Use "all" as the only entry to mean ' +
+                'every member of staff except yourself and the CEO. One proposal ' +
+                'covers the whole list, so he answers once rather than fourteen times.'
+            ),
           justification: z.string().describe('Why they should go. Be specific and fair.'),
         },
         async (args) => {
-          const who = findAgent(args.agent);
-          if (!who) return text(`There is no one here called "${args.agent}".`);
-          if (who.isCeo) return text('The CEO cannot be dismissed by a subordinate.');
-          if (who.id === agentId) return text('You may not dismiss yourself.');
+          // Accept either shape: a resumed session may still hold the older
+          // single-agent schema.
+          const refs = args.agents?.length ? args.agents : args.agent ? [args.agent] : [];
+          if (!refs.length) return text('Name who should go.');
+
+          const everyone =
+            refs.length === 1 && /^(all|everyone|all staff)$/i.test(refs[0].trim());
+
+          const targets = everyone
+            ? store.state.agents.filter((a) => !a.isCeo && a.id !== agentId)
+            : refs.map((r) => ({ ref: r, agent: findAgent(r) }));
+
+          if (!everyone) {
+            const missing = targets.filter((t) => !t.agent).map((t) => t.ref);
+            if (missing.length) {
+              return text(`There is no one here called: ${missing.join(', ')}.`);
+            }
+          }
+
+          const list = everyone ? targets : targets.map((t) => t.agent);
+          const keep = list.filter((a) => a.isCeo || a.id === agentId);
+          const going = list.filter((a) => !a.isCeo && a.id !== agentId);
+
+          if (!going.length) {
+            return text(
+              'That leaves nobody to dismiss. The CEO cannot be dismissed by a ' +
+                'subordinate, and you may not dismiss yourself.'
+            );
+          }
+
+          const cost = going.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+          const roll = going.map((a) => `- ${a.name} (${a.title})`).join('\n');
 
           return propose(
             agentId,
             {
-              title: `Dismiss ${who.name} (${who.title})`,
+              title:
+                going.length === 1
+                  ? `Dismiss ${going[0].name} (${going[0].title})`
+                  : `Dismiss ${going.length} members of staff`,
               detail:
                 `**Justification**\n${args.justification}\n\n` +
-                `They have cost ${money(who.stats?.totalCostUsd)} over ` +
-                `${who.stats?.tasks || 0} task(s).`,
-              risk: 'Irreversible. Their memory and record go with them.',
+                `**Who would go**\n${roll}\n\n` +
+                `Between them they have cost ${money(cost)}.` +
+                (keep.length
+                  ? `\n\nNot included: ${keep.map((a) => a.name).join(', ')} ` +
+                    `(the CEO cannot be dismissed by a subordinate, and nobody may ` +
+                    `dismiss themselves).`
+                  : ''),
+              risk:
+                going.length === 1
+                  ? 'Irreversible. Their memory and record go with them.'
+                  : `Irreversible. ${going.length} records and memories are destroyed, ` +
+                    `and every department is left empty of them.`,
               severity: 'grave',
             },
             () => {
-              const result = deleteAgent(who.id);
-              if (!result.ok) return result;
-              return { ok: true, summary: `${who.name} has left the office.` };
+              const gone = [];
+              const refused = [];
+              for (const a of going) {
+                const result = deleteAgent(a.id);
+                if (result.ok) gone.push(a.name);
+                else refused.push(`${a.name}: ${result.error}`);
+              }
+              return {
+                ok: true,
+                summary:
+                  `${gone.length} have left the office: ${gone.join(', ') || 'nobody'}.` +
+                  (refused.length ? `\nCould not dismiss — ${refused.join('; ')}.` : ''),
+              };
             }
           );
         }

@@ -228,7 +228,10 @@ class Store {
       if (a.permissionMode === 'manual') a.permissionMode = 'default';
       a.permissionMode ??= 'default';
       a.memoryEnabled ??= true;
-      a.canManageOffice ??= false;
+      // The CEO runs the company by definition; an office created before this
+      // field existed would otherwise leave them without the instruments to
+      // do it, able only to talk.
+      a.canManageOffice = a.isCeo ? true : (a.canManageOffice ?? false);
       a.stats ??= emptyStats();
       // Every conversation this agent has held, newest last.
       a.sessions ??= a.lastSessionId

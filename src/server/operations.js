@@ -14,6 +14,16 @@ export function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
 }
 
+/**
+ * Late-bound so this module need not import the runtime, which imports it.
+ * Dismissing someone has to stop their session too, or the office forgets
+ * them while their Claude process carries on working.
+ */
+let stopAgent = null;
+export function setAgentStopper(fn) {
+  stopAgent = fn;
+}
+
 /** Would making `supervisorId` the boss of `agentId` close a loop? */
 export function createsCycle(agentId, supervisorId) {
   const seen = new Set([agentId]);
@@ -217,6 +227,8 @@ export function ensureCeoOffice() {
   suite.seats = 1;
   suite.w = CEO_ROOM_W;
   suite.h = CEO_ROOM_H;
+  // Whoever holds the post runs the company, and needs the instruments for it.
+  ceo.canManageOffice = true;
 
   if (ceo.departmentId !== suite.id) {
     const previous = ceo.departmentId;
@@ -590,11 +602,24 @@ export function deleteAgent(id) {
     return { ok: false, error: 'the CEO cannot be dismissed; appoint a successor first' };
   }
 
+  // Send them home before striking them off, so no session is left running
+  // for someone the office no longer knows about.
+  try {
+    stopAgent?.(id);
+  } catch {
+    /* a stuck session must not block the dismissal */
+  }
+
   store.state.agents = store.state.agents.filter((a) => a.id !== id);
   // Anyone who reported to them now reports to the CEO.
   for (const other of store.state.agents) {
     if (other.supervisorId === id) other.supervisorId = store.state.office.ceoAgentId;
   }
+  // A department whose head has gone has a vacant post, not a ghost one.
+  for (const dept of store.state.departments) {
+    if (dept.headAgentId === id) dept.headAgentId = null;
+  }
+
   store.save();
   bus.emitEvent('agent.deleted', { id });
   return { ok: true };

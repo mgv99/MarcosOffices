@@ -29,6 +29,7 @@ import {
   cancelPendingFor,
 } from './approvals.js';
 import { setOwnershipTest } from './discovery.js';
+import { setAgentStopper } from './operations.js';
 
 const MAX_ACTIVITY_IN_MEMORY = 400;
 
@@ -769,6 +770,12 @@ export async function stopAll() {
 }
 
 /** Record a milestone an agent reported through `report_progress`. */
+// Striking someone off the roster has to close their session with them.
+setAgentStopper((agentId) => {
+  workers.get(agentId)?.stop().catch(() => {});
+  workers.delete(agentId);
+});
+
 setMilestoneRecorder((agentId, { step, state, detail }) => {
   const worker = workers.get(agentId);
   if (!worker) return;
