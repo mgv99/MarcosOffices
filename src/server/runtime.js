@@ -597,8 +597,14 @@ export class AgentWorker {
         this.pendingTurns = Math.max(0, this.pendingTurns - 1);
         const ok = message.subtype === 'success';
         this.recordCost(message, ok);
+        const usage = message.usage || {};
         this.log('result', ok ? 'Task complete.' : `Task ended: ${message.subtype}`, {
           cost: message.total_cost_usd,
+          tokens:
+            (Number(usage.input_tokens) || 0) +
+            (Number(usage.cache_read_input_tokens) || 0) +
+            (Number(usage.cache_creation_input_tokens) || 0) +
+            (Number(usage.output_tokens) || 0),
           turns: message.num_turns,
           durationMs: message.duration_ms,
           ok,

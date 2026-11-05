@@ -49,10 +49,17 @@ function timeOf(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** Costs here are usually fractions of a cent, so four decimals earn their place. */
-function money(n) {
+/** Everything an agent has read and written, as one number. */
+function totalTokens(stats = {}) {
+  return (Number(stats.inputTokens) || 0) + (Number(stats.outputTokens) || 0);
+}
+
+/** Token counts run to millions, so abbreviate rather than print every digit. */
+function tokens(n) {
   const v = Number(n) || 0;
-  return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(v >= 100_000 ? 0 : 1)}k`;
+  return String(v);
 }
 
 /**
@@ -350,11 +357,12 @@ async function handleEvent({ type, data }) {
     }
 
     case 'agent.commands': {
+      // Stored only. The palette reads this on each keystroke, so there is
+      // nothing to re-render — and re-rendering here used to steal focus from
+      // the order box the instant a session finished starting up.
       if (state.snapshot?.workers?.[data.agentId]) {
         state.snapshot.workers[data.agentId].commands = data.commands;
       }
-      // Re-render so the order box learns what it can offer.
-      if (state.panel === 'agent' && state.selectedAgentId === data.agentId) renderPanel();
       break;
     }
 
@@ -369,9 +377,12 @@ async function handleEvent({ type, data }) {
     case 'agent.stats': {
       const agent = agentById(data.agentId);
       if (agent) agent.stats = data.stats;
-      if (['agent', 'dispatches', 'staff'].includes(state.panel)) {
-        renderPanel();
-      }
+
+      // On the agent's own panel only the usage line changes. Re-rendering
+      // the lot would pull focus out of the order box the moment a task
+      // finished — right when the next order is being typed.
+      if (state.panel === 'agent') refreshAgentSubhead(data.agentId);
+      else if (['dispatches', 'staff'].includes(state.panel)) renderPanel();
       break;
     }
 
@@ -607,7 +618,7 @@ function buildAgentSubhead(agent) {
   return h('div.agent-subhead', {}, [
     h('span.agent-facts', {
       text:
-        `${dept?.name || 'unassigned'} · ${money(stats.totalCostUsd)} over ` +
+        `${dept?.name || 'unassigned'} · ${tokens(totalTokens(stats))} tokens over ` +
         `${stats.tasks || 0} task(s)` +
         `${stats.errors ? ` · ${stats.errors} failure(s)` : ''}` +
         `${supervisor ? ` · reports to ${supervisor.name}` : ''}`,
@@ -897,6 +908,9 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     input.value = '';
     delete state.drafts[agent.id];
     autoGrow();
+    // Stay in the box so the next order can be typed straight away, whether
+    // the order went by keyboard or by the button.
+    input.focus();
     try {
       await api.order(agent.id, text);
     } catch (err) {
@@ -908,8 +922,10 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     }
   };
 
-  // Slash commands the live session advertises. Typing "/" offers them.
-  const commands = state.snapshot?.workers?.[agent.id]?.commands || [];
+  // Slash commands the live session advertises. Read on each keystroke
+  // rather than captured here: a session announces them when it starts, and
+  // rebuilding the console to pick them up would take the focus with it.
+  const commandsNow = () => state.snapshot?.workers?.[agent.id]?.commands || [];
   const palette = h('div.cmd-palette', { hidden: true });
 
   const closePalette = () => {
@@ -921,6 +937,7 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
     const value = input.value;
     // Only while the whole box is a single word starting with a slash.
     const match = /^\/(\w*)$/.exec(value.trim());
+    const commands = commandsNow();
     if (!match || !commands.length) return closePalette();
 
     const matches = commands
@@ -1002,9 +1019,7 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
         h('button.btn.btn-gold.order-send', {
           text: '↑',
           // The shortcut lives here now rather than as a line of chrome.
-          title: commands.length
-            ? `Issue order (Ctrl+Enter) · type / for ${commands.length} commands`
-            : 'Issue order (Ctrl+Enter)',
+          title: 'Issue order (Ctrl+Enter) · type / for commands',
           onclick: send,
         }),
       ]),
@@ -1120,7 +1135,7 @@ function terminalNode(entry) {
         text:
           `${entry.ok === false ? '✗' : '✓'} ${text}` +
           (entry.turns ? ` · ${entry.turns} turns` : '') +
-          (entry.cost ? ` · ${money(entry.cost)}` : ''),
+          (entry.tokens ? ` · ${tokens(entry.tokens)} tokens` : ''),
       });
 
     case 'error':
@@ -2019,26 +2034,28 @@ function renderDispatchesPanel() {
 /** What the office has spent, and on whom. */
 function ledgerCard() {
   const agents = state.snapshot.agents;
-  const total = agents.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+  const total = agents.reduce((n, a) => n + totalTokens(a.stats), 0);
   const spenders = agents
-    .filter((a) => (a.stats?.totalCostUsd || 0) > 0)
-    .sort((a, b) => (b.stats.totalCostUsd || 0) - (a.stats.totalCostUsd || 0));
+    .filter((a) => totalTokens(a.stats) > 0)
+    .sort((a, b) => totalTokens(b.stats) - totalTokens(a.stats));
 
   return h('div.card', {}, [
     h('div.card-head', {}, [
       h('div.card-title', { text: 'The ledger', style: { flex: '1' } }),
-      h('span.pill', { text: money(total) }),
+      h('span.pill', { text: `${tokens(total)} tokens` }),
     ]),
     spenders.length
       ? h(
           'div',
           {},
           spenders.slice(0, 8).map((a) => {
-            const share = total > 0 ? ((a.stats.totalCostUsd || 0) / total) * 100 : 0;
+            const used = totalTokens(a.stats);
+            const share = total > 0 ? (used / total) * 100 : 0;
             return h('div', { style: { marginTop: '7px' } }, [
               h('div.card-sub', {
                 text:
-                  `${a.name} — ${money(a.stats.totalCostUsd)} (${share.toFixed(0)}%) · ` +
+                  `${a.name} — ${tokens(used)} (${share.toFixed(0)}%) · ` +
+                  `in ${tokens(a.stats.inputTokens)} / out ${tokens(a.stats.outputTokens)} · ` +
                   `${a.stats.tasks || 0} task(s) · ${a.model}`,
               }),
               // A bar is the fastest read on who is eating the budget.
@@ -2257,7 +2274,9 @@ function renderStaffPanel() {
           }),
           h('div.card-sub', { text: `${agent.title} · ${dept?.name || '—'}` }),
           h('div.card-sub', {
-            text: `${money(agent.stats?.totalCostUsd)} · ${agent.stats?.tasks || 0} task(s)`,
+            text:
+              `${tokens(totalTokens(agent.stats))} tokens · ` +
+              `${agent.stats?.tasks || 0} task(s)`,
           }),
         ]),
         h('span.pill.pill-status', {

@@ -25,8 +25,19 @@ import {
 
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 
-const money = (n) => `$${(Number(n) || 0).toFixed(4)}`;
 const mins = (ms) => `${Math.round((Number(ms) || 0) / 60000)}m`;
+
+/** Everything an agent has read and written, as one number. */
+const totalTokens = (stats = {}) =>
+  (Number(stats.inputTokens) || 0) + (Number(stats.outputTokens) || 0);
+
+/** Lord Marcos reads usage in tokens, so the office reports it in tokens. */
+const tokens = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M tokens`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k tokens`;
+  return `${v} tokens`;
+};
 
 function findAgent(ref) {
   if (!ref) return null;
@@ -109,7 +120,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           const live = workerStates();
           const s = store.state;
 
-          const totalCost = s.agents.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+          const totalUsed = s.agents.reduce((n, a) => n + totalTokens(a.stats), 0);
           const pending = s.approvals.filter((a) => a.status === 'pending');
 
           const lines = [`# ${s.office.name}`, ''];
@@ -117,21 +128,21 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
             `Staff: ${s.agents.length} · Departments: ${s.departments.length} · ` +
               `Projects: ${s.projects.length}`
           );
-          lines.push(`Total spend to date: ${money(totalCost)}`);
+          lines.push(`Total used to date: ${tokens(totalUsed)}`);
           lines.push(`Awaiting sanction: ${pending.length}`);
           lines.push('');
 
           for (const dept of s.departments) {
             const staff = s.agents.filter((a) => a.departmentId === dept.id);
-            const deptCost = staff.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+            const deptUsed = staff.reduce((n, a) => n + totalTokens(a.stats), 0);
             lines.push(
-              `## ${dept.name} — ${staff.length}/${dept.seats} desks · ${money(deptCost)}`
+              `## ${dept.name} — ${staff.length}/${dept.seats} desks · ${tokens(deptUsed)}`
             );
             for (const a of staff) {
               const project = a.projectId ? store.project(a.projectId) : null;
               lines.push(
                 `  - ${a.name} (${a.title}) · ${live[a.id]?.status || 'offline'} · ` +
-                  `${a.model} · ${money(a.stats?.totalCostUsd)} over ${a.stats?.tasks || 0} task(s)` +
+                  `${a.model} · ${tokens(totalTokens(a.stats))} over ${a.stats?.tasks || 0} task(s)` +
                   `${project ? ` · on ${project.name}` : ''}` +
                   `${a.loop?.enabled ? ` · on shift every ${a.loop.intervalMinutes}m` : ''}`
               );
@@ -175,31 +186,30 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           }
 
           const rows = [...staff].sort(
-            (a, b) => (b.stats?.totalCostUsd || 0) - (a.stats?.totalCostUsd || 0)
+            (a, b) => totalTokens(b.stats) - totalTokens(a.stats)
           );
 
-          const total = store.state.agents.reduce(
-            (n, a) => n + (a.stats?.totalCostUsd || 0),
-            0
-          );
+          const total = store.state.agents.reduce((n, a) => n + totalTokens(a.stats), 0);
 
           const lines = rows.map((a) => {
             const st = a.stats || {};
-            const share = total > 0 ? ((st.totalCostUsd || 0) / total) * 100 : 0;
-            const perTask = st.tasks ? (st.totalCostUsd || 0) / st.tasks : 0;
+            const used = totalTokens(st);
+            const share = total > 0 ? (used / total) * 100 : 0;
+            const perTask = st.tasks ? Math.round(used / st.tasks) : 0;
             return (
               `${a.name} (${a.title}) · ${a.model}\n` +
-              `  spend ${money(st.totalCostUsd)} (${share.toFixed(1)}% of office) · ` +
-              `${st.tasks || 0} task(s) at ${money(perTask)} each\n` +
-              `  ${st.turns || 0} turns · ${mins(st.durationMs)} of work · ` +
-              `${st.errors || 0} failure(s) · tokens in ${st.inputTokens || 0} / out ${st.outputTokens || 0}\n` +
+              `  used ${tokens(used)} (${share.toFixed(1)}% of office) · ` +
+              `${st.tasks || 0} task(s) at ${tokens(perTask)} each\n` +
+              `  in ${tokens(st.inputTokens)} / out ${tokens(st.outputTokens)} · ` +
+              `${st.turns || 0} turns · ${mins(st.durationMs)} of work · ` +
+              `${st.errors || 0} failure(s)\n` +
               `  status ${live[a.id]?.status || 'offline'}` +
               `${st.lastActiveAt ? ` · last active ${new Date(st.lastActiveAt).toLocaleString()}` : ' · never worked'}`
             );
           });
 
           return text(
-            `Office total: ${money(total)}\n\n${lines.join('\n\n')}\n\n` +
+            `Office total: ${tokens(total)}\n\n${lines.join('\n\n')}\n\n` +
               `Note: a high spend is only a problem next to what the work was worth. ` +
               `Say what they produced for it before you call it waste.`
           );
@@ -225,13 +235,13 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
           const out = [];
           for (const p of projects) {
             const staff = store.state.agents.filter((a) => a.projectId === p.id);
-            const cost = staff.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+            const used = staff.reduce((n, a) => n + totalTokens(a.stats), 0);
 
             out.push(`## ${p.name}\n${p.directory}\n${p.description || ''}`);
             out.push(
               `Staffed by: ${staff.length ? staff.map((a) => `${a.name} (${a.title})`).join(', ') : 'nobody'}`
             );
-            out.push(`Spend by posted staff: ${money(cost)}`);
+            out.push(`Used by posted staff: ${tokens(used)}`);
 
             try {
               const entries = await fsp.readdir(p.directory, { withFileTypes: true });
@@ -552,7 +562,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
             );
           }
 
-          const cost = going.reduce((n, a) => n + (a.stats?.totalCostUsd || 0), 0);
+          const used = going.reduce((n, a) => n + totalTokens(a.stats), 0);
           const roll = going.map((a) => `- ${a.name} (${a.title})`).join('\n');
 
           return propose(
@@ -565,7 +575,7 @@ export function buildHqServer(agentId, { workerStates = () => ({}) } = {}) {
               detail:
                 `**Justification**\n${args.justification}\n\n` +
                 `**Who would go**\n${roll}\n\n` +
-                `Between them they have cost ${money(cost)}.` +
+                `Between them they have used ${tokens(used)}.` +
                 (keep.length
                   ? `\n\nNot included: ${keep.map((a) => a.name).join(', ')} ` +
                     `(the CEO cannot be dismissed by a subordinate, and nobody may ` +
