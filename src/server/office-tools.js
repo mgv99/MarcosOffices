@@ -288,18 +288,30 @@ export function buildOfficeServer(agentId) {
               'Two to four concrete choices. Put the one you recommend first. ' +
                 'Omit only when the question genuinely has no shape to offer.'
             ),
+          multiSelect: z
+            .boolean()
+            .optional()
+            .describe(
+              'Set TRUE whenever several options could sensibly be chosen together — ' +
+                '"which of these should I fix?", "which areas need work?". Set FALSE ' +
+                'only when the options genuinely exclude one another, such as picking ' +
+                'one colour scheme. If you are about to write "you may pick more than ' +
+                'one" into the question itself, set this TRUE instead and leave the ' +
+                'question clean — the interface handles the rest.'
+            ),
           context: z
             .string()
             .optional()
             .describe('What he needs to know to answer, briefly.'),
         },
-        async ({ question, options, context }) => {
+        async ({ question, options, context, multiSelect }) => {
           const verdict = await requestApproval({
             agentId,
             kind: 'question',
             title: question,
             detail: context || '',
-            options: (options || []).slice(0, 6),
+            options: (options || []).slice(0, 8),
+            multiSelect: !!multiSelect,
           });
 
           const lord = store.state.office.lordName || 'Lord Marcos';

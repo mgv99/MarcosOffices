@@ -365,6 +365,7 @@ export class AgentWorker {
           label: o.label,
           description: o.description || '',
         })),
+        multiSelect: !!q.multiSelect,
       });
 
       answers.push(

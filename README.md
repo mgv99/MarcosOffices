@@ -70,6 +70,17 @@ Each agent has four tabs, and the first two are deliberately different things:
 - **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
 - **Memory** — their private memory file, editable.
 
+### Taking an agent into a real terminal
+
+Each agent's panel shows a copyable `claude --resume <sessionId>` command (with a `cd`
+into their project). The office drives agents through the SDK — that is what makes the
+approval gate and the office tools work — but the conversation underneath is an
+ordinary Claude Code session, so you can always pick it up by hand.
+
+Send them home in the office first. A session the office is not driving gets no
+approval gating and none of the `mcp__office__*` instruments, and two drivers on one
+conversation will talk over each other.
+
 ### Slash commands
 
 Type `/` in the order box and the session's own commands are offered — `/compact`,
@@ -141,9 +152,11 @@ Every agent gets an in-process MCP server, `mcp__office__*`:
 | `petition_lord` | send word directly to you |
 
 When an agent calls `ask_lord`, the question appears **inline in that agent's own
-console**, with its options as buttons — clicking one sends it straight back as the
-tool's result and the agent carries on. The same question also appears in HQ, where
-each pending item has an **→ Open chat** button that takes you to the agent.
+console**, at the foot of the conversation, with its options as buttons — clicking one
+sends it straight back as the tool's result and the agent carries on. Agents can mark
+a question `multiSelect` when several answers could apply, and the options become
+tick-boxes with a confirm button. The same question also appears in HQ, where each
+pending item has an **→ Open chat** button that takes you to the agent.
 Claude Code's own `AskUserQuestion` cannot be answered from a hook (there is no way to
 hand a tool its result), so the office intercepts it and routes it through the same
 queue, telling the agent to use `ask_lord` next time.

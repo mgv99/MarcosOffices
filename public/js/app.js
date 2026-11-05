@@ -474,6 +474,7 @@ function renderAgentPanel() {
       }),
     ]),
     projectRow(agent),
+    resumeRow(agent),
 
     h('div.actions', {}, [
       status === 'offline' || status === 'error'
@@ -576,6 +577,58 @@ function projectRow(agent) {
   ]);
 }
 
+/**
+ * The command to open this agent's actual conversation in a real terminal.
+ *
+ * The office drives agents through the SDK, which is what makes the approval
+ * gate and the office tools work — but the conversation is an ordinary Claude
+ * Code session, so you can always pick it up by hand.
+ */
+function resumeRow(agent) {
+  const sessionId = state.snapshot.workers?.[agent.id]?.sessionId || agent.lastSessionId;
+  if (!sessionId) return null;
+
+  const project = agent.projectId
+    ? state.snapshot.projects.find((p) => p.id === agent.projectId)
+    : null;
+  const command = project
+    ? `cd "${project.directory}"; claude --resume ${sessionId}`
+    : `claude --resume ${sessionId}`;
+
+  const copy = h('button.btn.btn-sm', {
+    text: '⧉ Copy',
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        copy.textContent = '✓ Copied';
+        setTimeout(() => (copy.textContent = '⧉ Copy'), 1500);
+      } catch {
+        // Clipboard can be refused; selecting the text is the fallback.
+        field.select();
+        toast({ title: 'Press Ctrl+C to copy', kind: 'info' });
+      }
+    },
+  });
+
+  const field = h('input.resume-cmd', {
+    type: 'text',
+    value: command,
+    readonly: true,
+    onclick: (e) => e.target.select(),
+  });
+
+  return h('div.resume-row', {}, [
+    h('div.project-label', { text: 'TERMINAL' }),
+    h('div.resume-line', {}, [field, copy]),
+    h('div.card-sub', {
+      text:
+        'Opens this agent\'s own conversation in a real terminal. Note: the office ' +
+        'cannot gate tools or offer its instruments in a session it does not drive — ' +
+        'so send them home here first, or you will both be talking at once.',
+    }),
+  ]);
+}
+
 /** A live-rendered portrait of the agent, from the same sprite the map uses. */
 function portrait(agent) {
   const canvas = h('canvas', { width: 32, height: 48, style: { imageRendering: 'pixelated', flex: 'none' } });
@@ -671,6 +724,12 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
   // The feed is tagged with the agent so live events can find every view of
   // them at once — side panel and floating windows alike. `data-feed-filter`
   // tells appendActivity which entries this particular view wants.
+  // Anything still awaiting an answer sits at the END of the conversation,
+  // below the history. Rendering it above meant the auto-scroll to the newest
+  // line pushed it out of sight, so a question only ever showed if it arrived
+  // while you happened to be watching.
+  const pending = h('div.feed-pending', {}, waiting.map((a) => approvalCard(a)));
+
   const scroller = h(
     'div.feed-scroll.terminal',
     { 'data-feed-agent': agent.id, 'data-feed-filter': 'terminal' },
@@ -681,12 +740,12 @@ function buildAgentConsole(agent, { activity, showNote = true } = {}) {
             'You speak as Lord Marcos, their god and employer. They address you as ' +
             'The Lord Almighty, He Who Is Everywhere and Rules Over All.',
         }),
-      ...(waiting.length ? waiting.map((a) => approvalCard(a, { compact: true })) : []),
       h(
         'div.feed.feed-term',
         {},
         (activity || []).filter(isTerminal).slice(-400).map(terminalNode)
       ),
+      pending,
     ]
   );
 
@@ -911,14 +970,14 @@ function showApprovalInFeeds(approval) {
   for (const scroller of document.querySelectorAll(
     `[data-feed-agent="${CSS.escape(approval.agentId)}"]`
   )) {
-    const feed = scroller.querySelector('.feed');
-    if (!feed) continue;
-    if (feed.querySelector(`[data-approval="${CSS.escape(approval.id)}"]`)) continue;
+    // Pending items live in their own container at the foot of the feed, so a
+    // re-render finds them in the same place a live arrival put them.
+    const pending = scroller.querySelector('.feed-pending');
+    if (!pending) continue;
+    if (pending.querySelector(`[data-approval="${CSS.escape(approval.id)}"]`)) continue;
 
-    const atBottom =
-      scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 80;
-    feed.append(approvalCard(approval));
-    if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+    pending.append(approvalCard(approval));
+    scroller.scrollTop = scroller.scrollHeight;
   }
 }
 
@@ -1533,12 +1592,15 @@ function questionCard(approval) {
   });
 
   const options = Array.isArray(approval.options) ? approval.options : [];
+  const multi = !!approval.multiSelect && options.length > 0;
 
   return h('div.card.question', { 'data-approval': approval.id }, [
     h('div.card-head', {}, [
       h('div', { style: { flex: '1', minWidth: '0' } }, [
         h('div.card-title', { text: approval.title, style: { fontSize: '12px' } }),
-        h('div.card-sub', { text: `${approval.agentName} asks you` }),
+        h('div.card-sub', {
+          text: `${approval.agentName} asks you${multi ? ' · choose any' : ''}`,
+        }),
       ]),
       openChatButton(approval),
       h('span.pill', { text: timeOf(approval.createdAt) }),
@@ -1547,27 +1609,63 @@ function questionCard(approval) {
     approval.detail ? markdownNode(approval.detail) : null,
 
     options.length
-      ? h(
-          'div.q-options',
-          {},
-          options.map((o, i) =>
-            h('button.q-option', { onclick: () => send(o.label) }, [
-              h('div.q-option-label', {
-                // The agent is told to put its recommendation first.
-                text: i === 0 ? `${o.label}  ★` : o.label,
-              }),
-              o.description && h('div.q-option-desc', { text: o.description }),
-            ])
+      ? multi
+        ? // Several may be chosen: tick them, then confirm.
+          h(
+            'div.q-options',
+            {},
+            options.map((o, i) =>
+              h('label.q-option.q-option-multi', {}, [
+                h('input', { type: 'checkbox', 'data-choice': o.label }),
+                h('div', {}, [
+                  h('div.q-option-label', { text: i === 0 ? `${o.label}  ★` : o.label }),
+                  o.description && h('div.q-option-desc', { text: o.description }),
+                ]),
+              ])
+            )
           )
-        )
+        : h(
+            'div.q-options',
+            {},
+            options.map((o, i) =>
+              h('button.q-option', { onclick: () => send(o.label) }, [
+                h('div.q-option-label', {
+                  // The agent is told to put its recommendation first.
+                  text: i === 0 ? `${o.label}  ★` : o.label,
+                }),
+                o.description && h('div.q-option-desc', { text: o.description }),
+              ])
+            )
+          )
+      : null,
+
+    multi
+      ? h('div.actions', {}, [
+          h('button.btn.btn-primary.btn-sm', {
+            text: '✓ Confirm selection',
+            onclick: (e) => {
+              const card = e.target.closest('.question');
+              const chosen = [...card.querySelectorAll('[data-choice]:checked')].map(
+                (el) => el.dataset.choice
+              );
+              const extra = other.value.trim();
+              if (!chosen.length && !extra) {
+                return toast({ title: 'Choose at least one', kind: 'error' });
+              }
+              send([...chosen, extra].filter(Boolean).join('; '));
+            },
+          }),
+          h('span.card-sub', { text: 'Pick as many as apply' }),
+        ])
       : null,
 
     h('div.actions', {}, [
       other,
-      h('button.btn.btn-gold.btn-sm', {
-        text: 'Send',
-        onclick: () => other.value.trim() && send(other.value.trim()),
-      }),
+      !multi &&
+        h('button.btn.btn-gold.btn-sm', {
+          text: 'Send',
+          onclick: () => other.value.trim() && send(other.value.trim()),
+        }),
     ]),
   ]);
 }

@@ -59,6 +59,7 @@ export async function requestApproval({
   toolName = null,
   toolInput = null,
   options = null,
+  multiSelect = false,
 }) {
   const agent = store.agent(agentId);
   if (!agent) throw new Error(`unknown agent ${agentId}`);
@@ -83,8 +84,10 @@ export async function requestApproval({
     severity,
     toolName,
     toolInput,
-    // For kind 'question': the choices the agent is offering.
+    // For kind 'question': the choices the agent is offering, and whether
+    // more than one may be picked.
     options,
+    multiSelect,
     route, // 'ceo' | 'lord'
     status: 'pending',
     createdAt: Date.now(),

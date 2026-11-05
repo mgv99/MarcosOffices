@@ -370,6 +370,10 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
 .q-option:hover { border-color: var(--violet); background: var(--panel-2); }
 .q-option:active { transform: translateY(1px); }
 
+.q-option-multi { display: flex; gap: 10px; align-items: flex-start; }
+.q-option-multi input { margin-top: 3px; flex: none; accent-color: var(--violet); }
+.q-option-multi:has(input:checked) { border-color: var(--violet); background: var(--panel-2); }
+
 .q-option-label { font-weight: 700; font-size: 12px; color: var(--text); }
 .q-option-desc { margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.45; }
 
@@ -528,6 +532,29 @@ textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
   letter-spacing: .5px;
 }
 .project-row > .card-sub { grid-column: 2; font-size: 11px; word-break: break-all; }
+
+.resume-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 9px;
+  align-items: center;
+  margin: 10px 0 2px;
+  padding-top: 10px;
+  border-top: 2px solid var(--line);
+}
+.resume-line { display: flex; gap: 6px; min-width: 0; }
+.resume-cmd {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--green);
+  background: var(--bg);
+}
+.resume-row > .card-sub { grid-column: 2; font-size: 11px; line-height: 1.45; }
+
+/* Pending questions sit at the foot of the conversation. */
+.feed-pending { margin-top: 10px; }
+.feed-pending:empty { display: none; }
 
 /* --- rendered markdown ---------------------------------------------------- */
 
