@@ -203,6 +203,20 @@ class Store {
     s.notifications ??= [];
     s.messages ??= [];
 
+    // Staff dismissed before departures were tidied up can leave references
+    // behind: a department headed by someone who has gone, or an agent
+    // reporting to one. Clear them, or the office describes a hierarchy that
+    // does not exist.
+    const present = new Set(s.agents.map((a) => a.id));
+    for (const d of s.departments) {
+      if (d.headAgentId && !present.has(d.headAgentId)) d.headAgentId = null;
+    }
+    for (const a of s.agents) {
+      if (a.supervisorId && !present.has(a.supervisorId)) {
+        a.supervisorId = a.isCeo ? null : s.office.ceoAgentId || null;
+      }
+    }
+
     // Rooms used to be laid out without a head of department's desk at the
     // front. Grow the old ones so the new seating plan fits inside them.
     for (const d of s.departments) {

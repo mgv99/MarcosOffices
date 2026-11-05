@@ -11,7 +11,6 @@ import {
   agentSeated,
   agentSprite,
   deskSprite,
-  chairSprite,
   plantSprite,
   coolerSprite,
   floorTile,
@@ -27,6 +26,16 @@ import {
 // Zoom 1 is the whole-office overview; rooms are tall enough now that a
 // multi-row floor plan does not fit at 2x.
 const ZOOM_LEVELS = [1, 2, 3, 4, 5, 6];
+
+/** Clip a name to the width available, with an ellipsis if it will not fit. */
+function fitText(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  for (let n = text.length - 1; n > 1; n--) {
+    const candidate = text.slice(0, n) + '…';
+    if (ctx.measureText(candidate).width <= maxWidth) return candidate;
+  }
+  return text.slice(0, 1);
+}
 
 /** Desk 0 is the head of department's, at the front of the room. */
 const HEAD_SEAT = 0;
@@ -271,42 +280,40 @@ export class OfficeMap {
     const { ctx } = this;
     const { x, y } = this.deskPosition(dept, seat);
     const worker = agent ? this.workers[agent.id] : null;
-    const status = worker?.status || 'offline';
+    const status = agent ? worker?.status || 'offline' : 'offline';
     const busy = status === 'working' || status === 'awaiting';
 
-    // Chair behind the desk
-    ctx.drawImage(chairSprite(), x + 8, y - 22);
-
     if (agent) {
-      // Only animate staff who are actually doing something.
+      // Sat high enough that head and shoulders clear the monitor.
       const frame = busy ? Math.floor(Date.now() / 320) % 2 : 0;
-      ctx.drawImage(agentSeated(agent.appearance?.seed || agent.id, {
-        outfit: agent.isCeo ? 'suit' : agent.appearance?.outfit || 'shirt',
-        frame,
-      }), x + 8, y - 18);
+      ctx.drawImage(
+        agentSeated(agent.appearance?.seed || agent.id, {
+          outfit: agent.isCeo ? 'suit' : agent.appearance?.outfit || 'shirt',
+          frame,
+        }),
+        x + 8,
+        y - 26
+      );
     }
 
+    // The screen is the status light, so it is drawn last and reads first.
     // The front desk gets the executive finish, occupied or not.
     const grand = !!agent?.isCeo || seat === HEAD_SEAT;
-    ctx.drawImage(deskSprite({ lit: busy, ceo: grand }), x, y - 6);
+    const blink = status === 'working' ? Math.floor(Date.now() / 450) % 2 : 0;
+    ctx.drawImage(deskSprite({ status, ceo: grand, frame: blink }), x, y - 8);
 
     if (agent) {
       if (this.selectedAgentId === agent.id) {
-        ctx.drawImage(selectionRing(), x, y + 8);
-      }
-      if (status !== 'offline') {
-        const bob = status === 'working' ? Math.floor(Date.now() / 400) % 2 : 0;
-        // Tucked just above the agent's shoulder, not floating over the room.
-        ctx.drawImage(statusBubble(status), x + 18, y - 26 - bob);
+        ctx.drawImage(selectionRing(), x, y + 10);
       }
 
       this._hitboxes.push({
         kind: 'agent',
         id: agent.id,
         x,
-        y: y - 24,
+        y: y - 26,
         w: TILE * 2,
-        h: TILE * 3,
+        h: TILE * 3.5,
       });
     }
   }
@@ -388,24 +395,32 @@ export class OfficeMap {
       ctx.fillText(label, p.x, p.y);
     }
 
-    // Name tags under each member of staff. At the overview zoom they would
-    // collide into an unreadable smear, so the room plates carry the office.
-    ctx.font = '600 10px ui-monospace, Menlo, Consolas, monospace';
-    for (const dept of zoom < 2 ? [] : this.state.departments) {
+    // Name plates on every desk, at every zoom. The font shrinks and the name
+    // is clipped to the desk's width rather than disappearing — knowing who
+    // sits where matters most when you are looking at the whole floor.
+    const deskWidth = TILE * 2 * zoom;
+    const fontSize = Math.max(7, Math.min(11, Math.round(zoom * 2.4) + 5));
+    ctx.font = `600 ${fontSize}px ui-monospace, Menlo, Consolas, monospace`;
+
+    for (const dept of this.state.departments) {
       for (const agent of this.state.agents.filter((a) => a.departmentId === dept.id)) {
         const desk = this.deskPosition(dept, agent.seat);
-        const p = toScreen(desk.x + TILE, desk.y + TILE + 8);
+        const p = toScreen(desk.x + TILE, desk.y + TILE + 10);
         if (p.x < -100 || p.x > rect.width + 100) continue;
+        if (p.y < -40 || p.y > rect.height + 40) continue;
 
+        const label = fitText(ctx, agent.name, deskWidth - 4);
         const status = this.workers[agent.id]?.status || 'offline';
-        const w = ctx.measureText(agent.name).width + 12;
+        const w = ctx.measureText(label).width + 8;
+        const h = fontSize + 5;
 
-        ctx.fillStyle = 'rgba(10,12,18,0.85)';
-        ctx.fillRect(p.x - w / 2, p.y - 8, w, 15);
+        ctx.fillStyle = 'rgba(10,12,18,0.9)';
+        ctx.fillRect(p.x - w / 2, p.y - h / 2, w, h);
+        // A colour band under the name repeats the status the screen shows.
         ctx.fillStyle = STATUS_COLORS[status] || '#6b7280';
-        ctx.fillRect(p.x - w / 2, p.y + 5, w, 2);
-        ctx.fillStyle = this.selectedAgentId === agent.id ? '#ffd866' : '#d8d5cc';
-        ctx.fillText(agent.name, p.x, p.y);
+        ctx.fillRect(p.x - w / 2, p.y + h / 2 - 2, w, 2);
+        ctx.fillStyle = this.selectedAgentId === agent.id ? '#ffd866' : '#e4e1d8';
+        ctx.fillText(label, p.x, p.y - 1);
       }
     }
 

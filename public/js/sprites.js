@@ -205,48 +205,96 @@ export function wallTopTile(theme) {
   });
 }
 
-/** A desk: two tiles wide, with a monitor that glows when there is work. */
-export function deskSprite({ lit = false, ceo = false } = {}) {
-  return cached(`desk:${lit}:${ceo}`, TILE * 2, TILE * 2, (ctx) => {
+/**
+ * What each status looks like on a monitor. The screen is the status display:
+ * a lit colour carries across the whole floor at a glance, where a bubble over
+ * the head did not.
+ */
+const SCREEN = {
+  working: { glass: '#4ade80', ink: '#14532d', glow: '#86efac' },
+  awaiting: { glass: '#fbbf24', ink: '#713f12', glow: '#fde68a' },
+  idle: { glass: '#38bdf8', ink: '#0c4a6e', glow: '#7dd3fc' },
+  starting: { glass: '#d2a24c', ink: '#5c4215', glow: '#eac98a' },
+  error: { glass: '#f87171', ink: '#7f1d1d', glow: '#fca5a5' },
+  offline: { glass: '#2f3540', ink: '#2f3540', glow: null },
+};
+
+/** The mark on the screen, drawn in a 20x14 area at (6,2). */
+function screenGlyph(ctx, status, ink) {
+  switch (status) {
+    case 'working': // lines of code, as though something is being written
+      px(ctx, 9, 5, 9, 1, ink);
+      px(ctx, 9, 7, 13, 1, ink);
+      px(ctx, 9, 9, 6, 1, ink);
+      px(ctx, 17, 9, 5, 1, ink);
+      px(ctx, 9, 11, 10, 1, ink);
+      break;
+    case 'awaiting': // a large exclamation: this one wants you
+      px(ctx, 14, 4, 3, 6, ink);
+      px(ctx, 14, 11, 3, 2, ink);
+      break;
+    case 'idle': // z, asleep at the desk
+      px(ctx, 11, 5, 9, 2, ink);
+      px(ctx, 16, 7, 3, 2, ink);
+      px(ctx, 13, 9, 3, 2, ink);
+      px(ctx, 11, 11, 9, 2, ink);
+      break;
+    case 'starting': // an hourglass
+      px(ctx, 11, 4, 9, 2, ink);
+      px(ctx, 13, 6, 5, 2, ink);
+      px(ctx, 14, 8, 3, 1, ink);
+      px(ctx, 13, 9, 5, 2, ink);
+      px(ctx, 11, 11, 9, 2, ink);
+      break;
+    case 'error': // a cross
+      for (let i = 0; i < 7; i++) {
+        px(ctx, 12 + i, 4 + i, 2, 1, ink);
+        px(ctx, 18 - i, 4 + i, 2, 1, ink);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * A desk: two tiles wide, with a large monitor that carries the agent's
+ * status. There is no chair — the desk and its screen are what you read.
+ */
+export function deskSprite({ status = 'offline', ceo = false, frame = 0 } = {}) {
+  return cached(`desk:${status}:${ceo}:${frame}`, TILE * 2, TILE * 2, (ctx) => {
     const top = ceo ? '#6b4a2f' : '#a9743f';
     const front = ceo ? '#4e3522' : '#8a5c31';
     const edge = ceo ? '#372415' : '#6b4725';
+    const screen = SCREEN[status] || SCREEN.offline;
+
+    // Monitor: bezel, then the glass that does the talking.
+    px(ctx, 3, 0, 26, 20, '#232732');
+    px(ctx, 4, 1, 24, 18, '#13161d');
+    px(ctx, 6, 2, 20, 14, screen.glass);
+
+    // A lit screen throws a little light onto its own bezel.
+    if (screen.glow) {
+      px(ctx, 5, 1, 22, 1, screen.glow);
+      px(ctx, 5, 17, 22, 1, screen.ink);
+      // A working screen blinks its cursor between frames.
+      screenGlyph(ctx, status, screen.ink);
+      if (status === 'working' && frame === 1) px(ctx, 20, 11, 2, 1, screen.glass);
+    }
+
+    px(ctx, 13, 20, 6, 2, '#20202a'); // stand
+    px(ctx, 10, 22, 12, 1, '#20202a'); // base
 
     // Desk surface and front panel
-    px(ctx, 0, 14, 32, 8, top);
-    px(ctx, 0, 14, 32, 2, 'rgba(255,255,255,0.18)');
-    px(ctx, 0, 22, 32, 8, front);
-    px(ctx, 0, 29, 32, 2, edge);
+    px(ctx, 0, 23, 32, 6, top);
+    px(ctx, 0, 23, 32, 1, 'rgba(255,255,255,0.18)');
+    px(ctx, 0, 29, 32, 3, front);
+    px(ctx, 0, 31, 32, 1, edge);
 
-    // Monitor
-    px(ctx, 9, 2, 14, 11, '#2b2b36');
-    px(ctx, 10, 3, 12, 8, lit ? '#7fe3c4' : '#3d4452');
-    if (lit) {
-      // A few code-ish lines on the screen
-      px(ctx, 11, 4, 7, 1, '#1d6b56');
-      px(ctx, 11, 6, 9, 1, '#1d6b56');
-      px(ctx, 11, 8, 5, 1, '#1d6b56');
-    }
-    px(ctx, 14, 13, 4, 2, '#20202a'); // stand
-    px(ctx, 12, 15, 8, 1, '#20202a'); // base
-
-    // Keyboard and mug
-    px(ctx, 10, 17, 10, 3, '#d9d9e2');
-    px(ctx, 24, 16, 4, 4, ceo ? '#c9a227' : '#cf5f54');
-    px(ctx, 28, 17, 1, 2, ceo ? '#c9a227' : '#cf5f54');
-  });
-}
-
-/** An office chair, seen from behind: a padded back with armrests. */
-export function chairSprite() {
-  return cached('chair', TILE, TILE, (ctx) => {
-    px(ctx, 4, 0, 8, 9, '#49526a'); // backrest
-    px(ctx, 4, 0, 8, 2, '#5c6782'); // highlight along the top
-    px(ctx, 5, 3, 6, 4, '#3b4357'); // cushion seam
-    px(ctx, 2, 4, 2, 4, '#3b4357'); // armrests
-    px(ctx, 12, 4, 2, 4, '#3b4357');
-    px(ctx, 7, 9, 2, 3, '#2a2f3a'); // post
-    px(ctx, 4, 12, 8, 2, '#2a2f3a'); // base
+    // Keyboard, and a mug for the senior desks
+    px(ctx, 9, 25, 14, 3, '#cdd2dc');
+    px(ctx, 10, 26, 12, 1, '#9aa3b2');
+    px(ctx, 25, 24, 4, 4, ceo ? '#c9a227' : '#cf5f54');
   });
 }
 
