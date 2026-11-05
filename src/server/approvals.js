@@ -58,11 +58,14 @@ export async function requestApproval({
   severity = 'normal',
   toolName = null,
   toolInput = null,
+  options = null,
 }) {
   const agent = store.agent(agentId);
   if (!agent) throw new Error(`unknown agent ${agentId}`);
 
-  const route = routeFor(agent, { severity, kind });
+  // A question is never "auto-approved" and never ruled on by the CEO: it was
+  // addressed to Lord Marcos, and only he can answer it.
+  const route = kind === 'question' ? 'lord' : routeFor(agent, { severity, kind });
 
   if (route === 'auto') {
     return { decision: 'approved', by: 'office-policy', note: 'Auto-approved by standing policy.' };
@@ -80,6 +83,8 @@ export async function requestApproval({
     severity,
     toolName,
     toolInput,
+    // For kind 'question': the choices the agent is offering.
+    options,
     route, // 'ceo' | 'lord'
     status: 'pending',
     createdAt: Date.now(),
@@ -136,6 +141,33 @@ export function escalate(id, note = '') {
     agentId: approval.agentId,
     refId: approval.id,
   });
+}
+
+/**
+ * Answer a question an agent put to Lord Marcos. Unlike a verdict this carries
+ * words back rather than a yes or no.
+ */
+export function answerQuestion(id, answer) {
+  const question = store.state.approvals.find((a) => a.id === id);
+  if (!question) return { ok: false, error: 'no such question' };
+  if (question.kind !== 'question') return { ok: false, error: 'that is not a question' };
+  if (question.status !== 'pending') return { ok: false, error: 'already answered' };
+  if (!String(answer || '').trim()) return { ok: false, error: 'an answer needs words' };
+
+  question.status = 'decided';
+  question.decision = 'answered';
+  question.decidedBy = 'lord';
+  question.note = answer;
+  question.decidedAt = Date.now();
+  store.save();
+  bus.emitEvent('approval.decided', question);
+
+  const waiter = pending.get(id);
+  if (waiter) {
+    pending.delete(id);
+    waiter.resolve({ decision: 'answered', by: 'lord', note: answer });
+  }
+  return { ok: true, approval: question };
 }
 
 /** Hand down a verdict. Called by the GUI (Lord Marcos) or by the CEO. */

@@ -344,8 +344,56 @@ export class AgentWorker {
    * user has already allowlisted in ~/.claude/settings.json would sail past it
    * and never reach the approval queue.
    */
+  /**
+   * The agent called Claude Code's own AskUserQuestion. There is no way for a
+   * hook to hand a tool its result, so put the question to Lord Marcos through
+   * the office's queue and give the answer back in the decision reason. The
+   * wording matters: the agent must read it as an answer, not a refusal.
+   */
+  async answerAskUserQuestion(input) {
+    const questions = Array.isArray(input?.questions) ? input.questions : [];
+    const answers = [];
+
+    for (const q of questions.slice(0, 4)) {
+      const verdict = await requestApproval({
+        agentId: this.agentId,
+        kind: 'question',
+        title: q.question || q.header || 'A question for you',
+        detail: q.header ? `**${q.header}**` : '',
+        options: (q.options || []).map((o) => ({
+          label: o.label,
+          description: o.description || '',
+        })),
+      });
+
+      answers.push(
+        `${q.question || q.header}: ${
+          verdict.decision === 'answered' ? verdict.note : '(no answer given)'
+        }`
+      );
+    }
+
+    const lord = store.state.office.lordName || 'Lord Marcos';
+    return answers.length
+      ? `${lord} has answered your question directly. His answer:\n\n${answers.join('\n')}\n\n` +
+          `This IS his answer — proceed on it. Do not ask again, and do not treat ` +
+          `this as a refusal. In future use mcp__office__ask_lord, which returns ` +
+          `his answer to you properly.`
+      : `${lord} gave no answer. Report back rather than guessing.`;
+  }
+
   makePreToolUseHook() {
     return async (input) => {
+      if (input.tool_name === 'AskUserQuestion') {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: await this.answerAskUserQuestion(input.tool_input),
+          },
+        };
+      }
+
       const verdict = await this.askLeave(input.tool_name, input.tool_input);
       if (!verdict) return {}; // office has no opinion; normal rules apply
 
@@ -399,6 +447,9 @@ export class AgentWorker {
       this.log('error', `Could not report for duty: ${err.message}`);
       throw err;
     }
+
+    // Covers staff hired before memory files were created up front.
+    if (agent.memoryEnabled) store.ensureMemoryFile(this.agentId);
 
     this.log('system', `${agent.name} reports for duty.`);
     this._consume();

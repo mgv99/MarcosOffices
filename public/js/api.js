@@ -51,6 +51,7 @@ export const api = {
   approvals: () => request('GET', '/api/approvals'),
   resolve: (id, decision, note) =>
     request('POST', `/api/approvals/${id}/resolve`, { decision, note }),
+  answer: (id, answer) => request('POST', `/api/approvals/${id}/answer`, { answer }),
   escalate: (id) => request('POST', `/api/approvals/${id}/escalate`),
 
   readNotifications: (ids) => request('POST', '/api/notifications/read', { ids }),

@@ -264,6 +264,55 @@ export function buildOfficeServer(agentId) {
       ),
 
       tool(
+        'ask_lord',
+        'Put a question to Lord Marcos and WAIT for his answer. Use this whenever a ' +
+          'choice is his to make rather than yours: which of several approaches to ' +
+          'take, which of two readings of an instruction he meant, whether to carry ' +
+          'on down a path that has turned out more costly than expected. Offer him ' +
+          'concrete options wherever you can — it is far quicker to pick than to ' +
+          'compose. This call BLOCKS until he answers.',
+        {
+          question: z.string().describe('The question, in one or two plain sentences.'),
+          options: z
+            .array(
+              z.object({
+                label: z.string().describe('A short name for this choice.'),
+                description: z
+                  .string()
+                  .optional()
+                  .describe('What choosing it would mean, and its trade-off.'),
+              })
+            )
+            .optional()
+            .describe(
+              'Two to four concrete choices. Put the one you recommend first. ' +
+                'Omit only when the question genuinely has no shape to offer.'
+            ),
+          context: z
+            .string()
+            .optional()
+            .describe('What he needs to know to answer, briefly.'),
+        },
+        async ({ question, options, context }) => {
+          const verdict = await requestApproval({
+            agentId,
+            kind: 'question',
+            title: question,
+            detail: context || '',
+            options: (options || []).slice(0, 6),
+          });
+
+          const lord = store.state.office.lordName || 'Lord Marcos';
+          return text(
+            verdict.decision === 'answered'
+              ? `${lord} answers: ${verdict.note}`
+              : `No answer came back: ${verdict.note || 'the question was cancelled'}. ` +
+                  `Do not guess what he would have said — report back instead.`
+          );
+        }
+      ),
+
+      tool(
         'report_progress',
         'Record a milestone in your work so Lord Marcos can follow it without reading ' +
           'your whole terminal. Call it when you START a substantial step and again ' +

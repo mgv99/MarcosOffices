@@ -1395,7 +1395,69 @@ function ledgerCard() {
   ]);
 }
 
+/**
+ * An agent is waiting on your answer, and has offered choices. Picking one
+ * sends it straight back as the tool's result.
+ */
+function questionCard(approval) {
+  const send = async (answer) => {
+    try {
+      await api.answer(approval.id, answer);
+      toast({ title: 'Answered', body: answer.slice(0, 120), kind: 'done' });
+    } catch (err) {
+      toast({ title: 'Could not answer', body: err.message, kind: 'error' });
+    }
+  };
+
+  const other = h('input', {
+    type: 'text',
+    placeholder: 'Or answer in your own words…',
+    onkeydown: (e) => {
+      if (e.key === 'Enter' && e.target.value.trim()) send(e.target.value.trim());
+    },
+  });
+
+  const options = Array.isArray(approval.options) ? approval.options : [];
+
+  return h('div.card.question', {}, [
+    h('div.card-head', {}, [
+      h('div', { style: { flex: '1', minWidth: '0' } }, [
+        h('div.card-title', { text: approval.title, style: { fontSize: '12px' } }),
+        h('div.card-sub', { text: `${approval.agentName} awaits your answer` }),
+      ]),
+      h('span.pill', { text: timeOf(approval.createdAt) }),
+    ]),
+
+    approval.detail ? markdownNode(approval.detail) : null,
+
+    options.length
+      ? h(
+          'div.q-options',
+          {},
+          options.map((o, i) =>
+            h('button.q-option', { onclick: () => send(o.label) }, [
+              h('div.q-option-label', {
+                // The agent is told to put its recommendation first.
+                text: i === 0 ? `${o.label}  ★` : o.label,
+              }),
+              o.description && h('div.q-option-desc', { text: o.description }),
+            ])
+          )
+        )
+      : null,
+
+    h('div.actions', {}, [
+      other,
+      h('button.btn.btn-gold.btn-sm', {
+        text: 'Send',
+        onclick: () => other.value.trim() && send(other.value.trim()),
+      }),
+    ]),
+  ]);
+}
+
 function approvalCard(approval, { compact = false } = {}) {
+  if (approval.kind === 'question') return questionCard(approval);
   const note = h('input', { type: 'text', placeholder: 'A remark, if you wish…' });
 
   const decide = async (decision) => {

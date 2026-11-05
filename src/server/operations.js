@@ -233,6 +233,8 @@ export function createAgent(body = {}) {
 
   store.state.agents.push(agent);
   store.save();
+  // Give them their memory file on day one, not on first use.
+  if (agent.memoryEnabled) store.ensureMemoryFile(agent.id);
   bus.emitEvent('agent.created', agent);
   return { ok: true, agent };
 }

@@ -125,10 +125,21 @@ Every agent gets an in-process MCP server, `mcp__office__*`:
 | `send_message` | write to a colleague, in any department |
 | `check_inbox` | read what colleagues have sent |
 | `request_approval` | submit a decision — **blocks** until a verdict comes back |
+| `ask_lord` | ask you a question, offering options — **blocks** until you answer |
 | `remember` / `recall` | their private, persistent memory |
 | `roster` | who works here and what they do |
 | `report_progress` | record a milestone — this is what fills the Activity tab |
 | `petition_lord` | send word directly to you |
+
+When an agent calls `ask_lord`, HQ shows the question with its options as buttons —
+clicking one sends it straight back as the tool's result and the agent carries on.
+Claude Code's own `AskUserQuestion` cannot be answered from a hook (there is no way to
+hand a tool its result), so the office intercepts it and routes it through the same
+queue, telling the agent to use `ask_lord` next time.
+
+Each agent's memory file is created the day they are hired, at
+`~/.marcosoffices/agents/<id>/MEMORY.md`, and they are instructed to write to it
+before finishing any task of substance.
 
 Milestones come from `report_progress` rather than from Claude Code's own todo list:
 the Agent SDK does not expose `TodoWrite` to a session, so agents are instructed to

@@ -291,6 +291,35 @@ class Store {
   memoryFile(id) {
     return path.join(this.agentDir(id), 'MEMORY.md');
   }
+
+  /**
+   * Make sure an agent's memory file exists, with a header explaining what it
+   * is. Without this the file only appeared the first time an agent happened
+   * to call `remember`, so a new hire looked like they had no memory at all.
+   */
+  ensureMemoryFile(id) {
+    const agent = this.agent(id);
+    if (!agent) return null;
+
+    const file = this.memoryFile(id);
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (!fs.existsSync(file)) {
+        fs.writeFileSync(
+          file,
+          `# ${agent.name} — memory\n\n` +
+            `${agent.title}${agent.departmentId ? '' : ''} at ${this.state.office.name}.\n\n` +
+            `What I have chosen to remember from my service. Written by me with the\n` +
+            `\`remember\` tool, and readable by ${this.state.office.lordName || 'Lord Marcos'}.\n\n` +
+            `## What I have learned\n\n`,
+          'utf8'
+        );
+      }
+      return file;
+    } catch {
+      return null;
+    }
+  }
 }
 
 export const store = new Store();

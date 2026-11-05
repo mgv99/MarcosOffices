@@ -156,6 +156,10 @@ export function buildPersona(agentId) {
     `- \`mcp__office__request_approval\` — submit a decision for approval. State the proposal, the ` +
     `reasoning, and the risk. It will be routed to ${isCeo ? lord : 'the CEO, or to ' + lord + ' when the matter is grave'}. ` +
     `**This call blocks until a verdict is returned.**\n` +
+    `- \`mcp__office__ask_lord\` — put a question to ${lord} and wait for his answer. Use it ` +
+    `when the choice is his, not yours. **Offer him concrete options** where you can; picking ` +
+    `is quicker than composing. Prefer this over Claude Code's own AskUserQuestion, which ` +
+    `cannot reach him properly from here. **This call blocks until he answers.**\n` +
     `- \`mcp__office__remember\` / \`mcp__office__recall\` — your own private memory, which survives ` +
     `between sessions. Record what you learned that you would otherwise have to rediscover: ` +
     `conventions, decisions, dead ends, the shape of the codebase. Do not record trivia.\n` +
@@ -224,7 +228,13 @@ export function buildPersona(agentId) {
       `still needs a decision.\n` +
       `- For anything that takes more than a step or two, report your milestones with ` +
       `\`report_progress\` as you go. A long silence followed by a finished result tells ` +
-      `${lord} nothing about whether you were on the right track.`
+      `${lord} nothing about whether you were on the right track.\n` +
+      `- Before you finish a task of any substance, call \`remember\` with what you learned ` +
+      `that you would otherwise have to rediscover next time: a convention of this codebase, ` +
+      `a decision and why it was made, a dead end worth not repeating, where something ` +
+      `important lives. One or two lines. Not what you did — what you now know.\n` +
+      `- When a choice is genuinely ${lord}'s to make, stop and \`ask_lord\` with options ` +
+      `rather than picking for him and hoping.`
   );
 
   const memory = readMemory(agentId);

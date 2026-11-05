@@ -15,6 +15,7 @@ import { bus } from './bus.js';
 import {
   listApprovals,
   resolveApproval,
+  answerQuestion,
   escalate,
   reapStaleApprovals,
   notify,
@@ -393,6 +394,14 @@ route('POST', /^\/api\/approvals\/([\w]+)\/resolve$/, async (req, res, [id]) => 
     return fail(res, 400, 'decision must be "approved" or "rejected"');
   }
   const result = resolveApproval(id, decision, { by: 'lord', note });
+  if (!result.ok) return fail(res, 409, result.error);
+  ok(res, result.approval);
+});
+
+/** Answer a question an agent put to Lord Marcos. */
+route('POST', /^\/api\/approvals\/([\w]+)\/answer$/, async (req, res, [id]) => {
+  const { answer } = await readBody(req);
+  const result = answerQuestion(id, answer);
   if (!result.ok) return fail(res, 409, result.error);
   ok(res, result.approval);
 });
