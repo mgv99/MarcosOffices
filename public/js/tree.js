@@ -13,6 +13,11 @@ const CARD_H = 76;
 const GAP_X = 18;
 const GAP_Y = 58;
 
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2.5;
+
+const clampZoom = (z) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+
 /**
  * Lay out a tidy tree: children are placed side by side, and each parent is
  * centred over its own children.
@@ -42,6 +47,93 @@ export class HierarchyTree {
     this.state = null;
     this.workers = {};
     this.selectedAgentId = null;
+    this.zoom = 1;
+    this.canvasEl = null;
+    this._bindNavigation();
+  }
+
+  /**
+   * Drag to pan, scroll to zoom — the same gestures as the floor plan, so the
+   * two views do not have to be learned separately.
+   */
+  _bindNavigation() {
+    this.el.addEventListener('pointerdown', (e) => {
+      // Let the cards take their own clicks.
+      if (e.target.closest('.tree-card')) return;
+      e.preventDefault();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const left = this.el.scrollLeft;
+      const top = this.el.scrollTop;
+      this.el.style.cursor = 'grabbing';
+
+      const move = (ev) => {
+        this.el.scrollLeft = left - (ev.clientX - startX);
+        this.el.scrollTop = top - (ev.clientY - startY);
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        this.el.style.cursor = '';
+      };
+
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+
+    this.el.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const before = this.zoom;
+        const next = clampZoom(before * (e.deltaY > 0 ? 0.9 : 1.1));
+        if (next === before) return;
+
+        // Keep the point under the cursor where it is.
+        const rect = this.el.getBoundingClientRect();
+        const px = e.clientX - rect.left + this.el.scrollLeft;
+        const py = e.clientY - rect.top + this.el.scrollTop;
+        const ratio = next / before;
+
+        this.zoom = next;
+        this._applyZoom();
+        this.el.scrollLeft = px * ratio - (e.clientX - rect.left);
+        this.el.scrollTop = py * ratio - (e.clientY - rect.top);
+      },
+      { passive: false }
+    );
+  }
+
+  _applyZoom() {
+    if (!this.canvasEl) return;
+    this.canvasEl.style.transform = `scale(${this.zoom})`;
+    this.canvasEl.style.transformOrigin = '0 0';
+    // The wrapper has to grow with the content or scrolling stops early.
+    const w = parseFloat(this.canvasEl.dataset.w) || 0;
+    const h = parseFloat(this.canvasEl.dataset.h) || 0;
+    this.canvasEl.style.marginRight = `${w * (this.zoom - 1)}px`;
+    this.canvasEl.style.marginBottom = `${h * (this.zoom - 1)}px`;
+  }
+
+  setZoom(z) {
+    this.zoom = clampZoom(z);
+    this._applyZoom();
+  }
+
+  zoomBy(factor) {
+    this.setZoom(this.zoom * factor);
+  }
+
+  /** Frame the whole chart in the available space. */
+  fit() {
+    if (!this.canvasEl) return;
+    const w = parseFloat(this.canvasEl.dataset.w) || 1;
+    const h = parseFloat(this.canvasEl.dataset.h) || 1;
+    const rect = this.el.getBoundingClientRect();
+    this.setZoom(Math.min((rect.width - 48) / w, (rect.height - 96) / h, 1));
+    this.el.scrollLeft = 0;
+    this.el.scrollTop = 0;
   }
 
   setState(state) {
@@ -95,6 +187,8 @@ export class HierarchyTree {
     canvasEl.className = 'tree-canvas';
     canvasEl.style.width = `${width}px`;
     canvasEl.style.height = `${height}px`;
+    canvasEl.dataset.w = width;
+    canvasEl.dataset.h = height;
 
     // Connectors first, so the cards sit on top of them.
     canvasEl.append(this._connectors(agents, byId, positions, width, height));
@@ -105,6 +199,8 @@ export class HierarchyTree {
     }
 
     this.el.replaceChildren(canvasEl);
+    this.canvasEl = canvasEl;
+    this._applyZoom();
   }
 
   _connectors(agents, byId, positions, width, height) {

@@ -35,6 +35,21 @@ function recordMilestone(agentId, milestone) {
 
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 
+/**
+ * Who sent this, in words.
+ *
+ * Messages from Lord Marcos carry the sender id 'lord', which is not an agent
+ * — looking it up in the roster returned nothing and the recipient was told
+ * their own employer was "unknown".
+ */
+function senderName(fromAgentId) {
+  if (fromAgentId === 'lord') {
+    return `${store.state.office.lordName || 'Lord Marcos'} himself`;
+  }
+  const agent = store.agent(fromAgentId);
+  return agent ? `${agent.name} (${agent.title})` : 'a departed member of staff';
+}
+
 /** Find a colleague by id, exact name, or case-insensitive name. */
 function findAgent(ref) {
   if (!ref) return null;
@@ -149,19 +164,24 @@ export function buildOfficeServer(agentId) {
           );
           if (!inbox.length) return text('Your inbox is empty.');
 
-          const lines = inbox.slice(0, 30).map((m) => {
-            const from = store.agent(m.fromAgentId);
-            return (
-              `--- ${new Date(m.at).toLocaleString()} — from ${from ? from.name : 'unknown'}` +
+          const lines = inbox.slice(0, 30).map(
+            (m) =>
+              `--- ${new Date(m.at).toLocaleString()} — from ${senderName(m.fromAgentId)}` +
               `\nSubject: ${m.subject}\n${m.body}`
-            );
-          });
+          );
+
+          const lord = store.state.office.lordName || 'Lord Marcos';
+          const fromLord = inbox.some((m) => m.fromAgentId === 'lord');
 
           for (const m of inbox) m.read = true;
           store.save();
           bus.emitEvent('message.read', { agentId });
 
-          return text(`You have ${inbox.length} message(s):\n\n${lines.join('\n\n')}`);
+          return text(
+            `You have ${inbox.length} message(s):\n\n${lines.join('\n\n')}\n\n` +
+              `Reply with send_message, naming the sender.` +
+              (fromLord ? ` To answer ${lord}, send_message to "${lord}".` : '')
+          );
         }
       ),
 

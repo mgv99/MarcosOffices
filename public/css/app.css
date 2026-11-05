@@ -205,6 +205,21 @@ body.resizing iframe, body.resizing canvas { pointer-events: none; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* The agent heading: portrait beside the name, in the panel's title style. */
+.agent-heading { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.agent-heading > span {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.agent-subhead {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 10px; padding-bottom: 10px;
+  border-bottom: 2px solid var(--line);
+}
+.agent-facts { font-size: 11px; color: var(--muted); min-width: 0; }
+
+.agent-controls { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+
 .side-body { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
 
 /* The Orders tab owns its own scrolling so the order box can sit at the
@@ -214,6 +229,10 @@ body.resizing iframe, body.resizing canvas { pointer-events: none; }
   display: flex;
   flex-direction: column;
 }
+.side-body[data-layout="console"] > .agent-subhead,
+.side-body[data-layout="console"] > .agent-controls,
+.side-body[data-layout="console"] > .tabs { flex: none; }
+
 .side-body[data-layout="console"] > .panel-content {
   flex: 1;
   min-height: 0;
@@ -647,9 +666,12 @@ h1.md-h, h2.md-h { font-size: 13px; }
   overflow: auto;
   background: #10121a;
   padding: 70px 24px 24px;
+  cursor: grab;
+  user-select: none;
 }
+.tree-view:active { cursor: grabbing; }
 
-.tree-canvas { position: relative; margin: 0 auto; }
+.tree-canvas { position: relative; }
 
 .tree-lines { position: absolute; inset: 0; pointer-events: none; }
 .tree-line { fill: none; stroke: var(--line-bright); stroke-width: 2; }

@@ -161,10 +161,6 @@ function setView(next) {
   $('#tree-view').hidden = next !== 'tree';
   $('#btn-view-office').dataset.active = String(next === 'office');
   $('#btn-view-tree').dataset.active = String(next === 'tree');
-  // Zoom controls belong to the floor plan only.
-  for (const id of ['#btn-fit', '#btn-zoom-in', '#btn-zoom-out']) {
-    $(id).hidden = next !== 'office';
-  }
 
   if (next === 'tree') {
     tree.setState(state.snapshot);
@@ -186,11 +182,14 @@ function wireChrome() {
   $('#side-close').addEventListener('click', closePanel);
   $('#btn-view-office').addEventListener('click', () => setView('office'));
   $('#btn-view-tree').addEventListener('click', () => setView('tree'));
-  $('#btn-fit').addEventListener('click', () => map.fit());
+  // The zoom controls drive whichever view is showing.
+  $('#btn-fit').addEventListener('click', () => (view === 'tree' ? tree.fit() : map.fit()));
   $('#btn-zoom-in').addEventListener('click', () => {
+    if (view === 'tree') return tree.zoomBy(1.2);
     map.camera.zoomIndex = Math.min(map.maxZoomIndex, map.camera.zoomIndex + 1);
   });
   $('#btn-zoom-out').addEventListener('click', () => {
+    if (view === 'tree') return tree.zoomBy(1 / 1.2);
     map.camera.zoomIndex = Math.max(0, map.camera.zoomIndex - 1);
   });
 
@@ -495,7 +494,11 @@ async function openAgent(id) {
 }
 
 function setPanel(title, body) {
-  $('#side-title').textContent = title;
+  // A title may be a plain string or a composed node (an agent's portrait and
+  // name, for instance).
+  if (title instanceof Node) $('#side-title').replaceChildren(title);
+  else $('#side-title').textContent = title;
+
   // replaceChildren stringifies whatever it is given, so a `cond ? node : null`
   // would print "null". Drop the empties the way h() does.
   $('#side-body').replaceChildren(
@@ -539,55 +542,53 @@ function renderAgentPanel() {
   const dept = deptById(agent.departmentId);
   const supervisor = agent.supervisorId ? agentById(agent.supervisorId) : null;
 
-  const header = h('div.card', {}, [
-    h('div.card-head', {}, [
-      portrait(agent),
-      h('div', { style: { flex: '1', minWidth: '0' } }, [
-        h('div.card-title', {
-          text: `${agent.name}${agent.isCeo ? ' ♛' : ''}${agent.canManageOffice ? ' ⚙' : ''}`,
-        }),
-        h('div.card-sub', {
-          text: `${agent.title} · ${dept?.name || 'unassigned'}${
-            supervisor ? ` · reports to ${supervisor.name}` : ''
-          }`,
-        }),
-        h('div.card-sub', {
-          text:
-            `${money(agent.stats?.totalCostUsd)} over ${agent.stats?.tasks || 0} task(s)` +
-            `${agent.stats?.errors ? ` · ${agent.stats.errors} failure(s)` : ''}`,
-        }),
-      ]),
-      h('span.pill.pill-status', {
-        text: status,
-        style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
-      }),
-    ]),
-    projectRow(agent),
-    sessionRow(agent),
-    resumeRow(agent),
+  // The title carries the portrait and the name, in the panel's own heading
+  // style; everything factual sits beneath it in one grey line.
+  const heading = h('div.agent-heading', {}, [
+    portrait(agent, 22, 33),
+    h('span', {
+      text: `${agent.name.toUpperCase()} — ${agent.title}` +
+        `${agent.isCeo ? ' ♛' : ''}${agent.canManageOffice ? ' ⚙' : ''}`,
+    }),
+  ]);
 
-    h('div.actions', {}, [
-      status === 'offline' || status === 'error'
-        ? h('button.btn.btn-primary.btn-sm', {
-            text: '▶ Call to duty',
-            onclick: () => guard(() => api.hire(agent.id), 'Reporting for duty…'),
-          })
-        : h('button.btn.btn-danger.btn-sm', {
-            text: '■ Send home',
-            onclick: () => guard(() => api.dismiss(agent.id), 'Sent home.'),
-          }),
-      status === 'working' &&
-        h('button.btn.btn-sm', {
-          text: '⏸ Interrupt',
-          onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
+  const stats = agent.stats || {};
+  const header = h('div.agent-subhead', {}, [
+    h('span.agent-facts', {
+      text:
+        `${dept?.name || 'unassigned'} · ${money(stats.totalCostUsd)} over ` +
+        `${stats.tasks || 0} task(s)` +
+        `${stats.errors ? ` · ${stats.errors} failure(s)` : ''}` +
+        `${supervisor ? ` · reports to ${supervisor.name}` : ''}`,
+    }),
+    h('span.spacer'),
+    h('span.pill.pill-status', {
+      text: status,
+      style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
+    }),
+  ]);
+
+  const controls = h('div.agent-controls', {}, [
+    status === 'offline' || status === 'error'
+      ? h('button.btn.btn-primary.btn-sm', {
+          text: '▶ Call to duty',
+          onclick: () => guard(() => api.hire(agent.id), 'Reporting for duty…'),
+        })
+      : h('button.btn.btn-danger.btn-sm', {
+          text: '■ Send home',
+          onclick: () => guard(() => api.dismiss(agent.id), 'Sent home.'),
         }),
-      h('button.btn.btn-sm', { text: '⌖ Find on map', onclick: () => map.focusAgent(agent.id) }),
+    status === 'working' &&
       h('button.btn.btn-sm', {
-        text: '⧉ Pop out',
-        title: 'Open a floating console, so you can watch several agents at once',
-        onclick: () => openAgentWindow(agent.id),
+        text: '⏸ Interrupt',
+        onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
       }),
-    ]),
+    h('button.btn.btn-sm', { text: '⌖ Find', onclick: () => map.focusAgent(agent.id) }),
+    h('button.btn.btn-sm', {
+      text: '⧉ Pop out',
+      title: 'Open a floating console, so you can watch several agents at once',
+      onclick: () => openAgentWindow(agent.id),
+    }),
   ]);
 
   const body = h('div.panel-content');
@@ -606,7 +607,7 @@ function renderAgentPanel() {
     }
   );
 
-  setPanel(`${agent.name.toUpperCase()} — ${agent.title}`, [header, nav, body]);
+  setPanel(heading, [header, controls, nav, body]);
   // The Orders tab manages its own scrolling so the order box can sit at the
   // bottom; every other tab scrolls as a normal document.
   $('#side-body').dataset.layout = state.agentTab === 'orders' ? 'console' : 'scroll';
@@ -777,15 +778,19 @@ function resumeRow(agent) {
 }
 
 /** A live-rendered portrait of the agent, from the same sprite the map uses. */
-function portrait(agent) {
-  const canvas = h('canvas', { width: 32, height: 48, style: { imageRendering: 'pixelated', flex: 'none' } });
+function portrait(agent, w = 32, h = 48) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  Object.assign(canvas.style, { imageRendering: 'pixelated', flex: 'none' });
+
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(
     agentSprite(agent.appearance?.seed || agent.id, {
       outfit: agent.isCeo ? 'suit' : agent.appearance?.outfit || 'shirt',
     }),
-    0, 0, 32, 48
+    0, 0, w, h
   );
   return canvas;
 }
@@ -1271,7 +1276,7 @@ function renderAgentConfig(container, agent) {
       permissionMode: form.permissionMode.value,
       departmentId: form.departmentId.value,
       supervisorId: form.supervisorId.value || null,
-      projectId: form.projectId.value || null,
+      // The project is set live by its own row above, not by this form.
       memoryEnabled: form.memoryEnabled.checked,
       canManageOffice: form.canManageOffice.checked,
       approvalPolicy: {
@@ -1308,6 +1313,10 @@ function renderAgentConfig(container, agent) {
   };
 
   container.replaceChildren(
+    // Where they work, which conversation they are on, and how to reach that
+    // conversation by hand — the facts you change rather than read.
+    h('div.card', {}, [projectRow(agent), sessionRow(agent), resumeRow(agent)]),
+
     h('div.row', {}, [
       field('Name', text('name', agent.name)),
       field('Title', text('title', agent.title)),
@@ -1335,16 +1344,6 @@ function renderAgentConfig(container, agent) {
         )
       ),
     ]),
-
-    field(
-      'Project',
-      select(
-        'projectId',
-        [['', '— no fixed post —'], ...snapshot.projects.map((p) => [p.id, `${p.name} — ${p.directory}`])],
-        agent.projectId || ''
-      ),
-      'Their working directory. They may read elsewhere, but this is their post.'
-    ),
 
     h('div.row', {}, [
       field('Model', select('model', [
