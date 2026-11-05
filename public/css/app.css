@@ -618,10 +618,14 @@ h1.md-h, h2.md-h { font-size: 13px; }
 
 /* --- toasts --------------------------------------------------------------- */
 
+/* Left-hand side: the right is where the panel and its content live. */
 .toasts {
-  position: fixed; bottom: 16px; right: 16px; z-index: 90;
-  display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+  position: fixed; bottom: 16px; left: 16px; z-index: 90;
+  display: flex; flex-direction: column; gap: 8px; max-width: 360px;
 }
+.toast[data-goes-somewhere="true"] { cursor: pointer; }
+.toast[data-goes-somewhere="true"]:hover { border-color: var(--gold); }
+.toast-go { margin-top: 4px; font-size: 10px; color: var(--gold); }
 .toast {
   background: var(--panel-2); border: 2px solid var(--line-bright);
   border-left-width: 4px; padding: 10px 12px; font-size: 12px;
@@ -633,7 +637,93 @@ h1.md-h, h2.md-h { font-size: 13px; }
 .toast[data-kind="approval"], .toast[data-kind="petition"] { border-left-color: var(--gold); }
 .toast[data-kind="done"] { border-left-color: var(--green); }
 .toast[data-kind="info"] { border-left-color: var(--blue); }
-@keyframes slide-in { from { transform: translateX(16px); opacity: 0; } }
+@keyframes slide-in { from { transform: translateX(-16px); opacity: 0; } }
+
+/* --- hierarchy view ------------------------------------------------------- */
+
+.tree-view {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: #10121a;
+  padding: 70px 24px 24px;
+}
+
+.tree-canvas { position: relative; margin: 0 auto; }
+
+.tree-lines { position: absolute; inset: 0; pointer-events: none; }
+.tree-line { fill: none; stroke: var(--line-bright); stroke-width: 2; }
+
+.tree-card {
+  position: absolute;
+  width: 132px;
+  height: 76px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  text-align: left;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  /* The department's colour, so the chart and the floor plan agree. */
+  border-top: 4px solid var(--dept, var(--line-bright));
+  cursor: pointer;
+  overflow: hidden;
+}
+.tree-card:hover { background: var(--panel-2); border-color: var(--line-bright); }
+.tree-card[data-selected="true"] { border-color: var(--gold); background: var(--panel-2); }
+
+.tree-portrait { image-rendering: pixelated; flex: none; }
+.tree-body { min-width: 0; flex: 1; }
+.tree-name {
+  font-size: 11px; font-weight: 700; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tree-title {
+  font-size: 10px; color: var(--muted); line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tree-dept {
+  margin-top: 2px; font-size: 9px; color: var(--dept, var(--dim));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tree-dot { position: absolute; top: 7px; right: 7px; width: 7px; height: 7px; }
+
+.view-switch { display: flex; gap: 0; margin-right: 6px; }
+.view-switch .btn { border-right-width: 0; }
+.view-switch .btn:last-child { border-right-width: 2px; }
+
+/* --- projects ------------------------------------------------------------- */
+
+.project-staff { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+
+.project-dept { border-left: 3px solid var(--dept, var(--line-bright)); padding-left: 9px; }
+.project-dept-name {
+  font-size: 10px; color: var(--dept, var(--muted));
+  text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px;
+}
+.project-members { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.project-member {
+  padding: 3px 9px;
+  background: var(--panel-3);
+  border: 1px solid var(--line-bright);
+  border-left-width: 3px;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.project-member:hover { background: var(--line); color: var(--gold); }
+
+.project-edit { margin-top: 10px; }
+.project-edit > summary {
+  cursor: pointer; color: var(--muted); font-size: 11px; padding: 4px 0; list-style: none;
+}
+.project-edit > summary::before { content: '▸ '; }
+.project-edit[open] > summary::before { content: '▾ '; }
+.project-edit > summary:hover { color: var(--text); }
+
+.dispatch:hover { border-color: var(--line-bright); }
 
 /* --- directory picker ----------------------------------------------------- */
 

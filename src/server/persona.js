@@ -20,16 +20,6 @@ function section(title, body) {
   return `\n## ${title}\n\n${String(body).trim()}\n`;
 }
 
-/** Read an agent's memory file, if it has one and it is enabled. */
-export function readMemory(agentId) {
-  const agent = store.agent(agentId);
-  if (!agent?.memoryEnabled) return '';
-  try {
-    return fs.readFileSync(store.memoryFile(agentId), 'utf8').trim();
-  } catch {
-    return '';
-  }
-}
 
 export function buildPersona(agentId) {
   const agent = store.agent(agentId);
@@ -160,9 +150,13 @@ export function buildPersona(agentId) {
     `when the choice is his, not yours. **Offer him concrete options** where you can; picking ` +
     `is quicker than composing. Prefer this over Claude Code's own AskUserQuestion, which ` +
     `cannot reach him properly from here. **This call blocks until he answers.**\n` +
-    `- \`mcp__office__remember\` / \`mcp__office__recall\` — your own private memory, which survives ` +
-    `between sessions. Record what you learned that you would otherwise have to rediscover: ` +
-    `conventions, decisions, dead ends, the shape of the codebase. Do not record trivia.\n` +
+    `- \`mcp__office__remember\` / \`recall\` / \`list_memory\` / \`forget\` — your private memory, ` +
+    `which survives between sessions and is kept in **topics**. File notes under a sensible ` +
+    `topic ("codebase", "build-system", "lord-preferences", "dead-ends") and reuse topics ` +
+    `rather than scattering notes. Record what you would otherwise have to rediscover; not ` +
+    `trivia, and not what the code already says. **Prune as well as write**: when you notice ` +
+    `a note that has gone stale or wrong, \`forget\` it. Stale memory is worse than none, ` +
+    `because it is believed.\n` +
     `- \`mcp__office__roster\` — look up who works here and what they do.\n` +
     `- \`mcp__office__report_progress\` — record a milestone. Call it when you begin a ` +
     `substantial step and again when you finish one, and whenever something changes ` +
@@ -223,6 +217,9 @@ export function buildPersona(agentId) {
       `- Verify before you claim. Run the test, read the file, check the output.\n` +
       `- Stay inside your remit. If the work belongs to another department, send them a message ` +
       `rather than doing it yourself.\n` +
+      `- **Check your inbox without being told.** Call \`check_inbox\` when you start work and ` +
+      `again before you report a task finished. Colleagues who write to you are waiting on ` +
+      `you; a message left unread is work left undone.\n` +
       `- Be brief. ${lord} and your superiors read many reports.\n` +
       `- When you finish a task, end with a short summary of what changed and what, if anything, ` +
       `still needs a decision.\n` +
@@ -237,12 +234,13 @@ export function buildPersona(agentId) {
       `rather than picking for him and hoping.`
   );
 
-  const memory = readMemory(agentId);
+  const memory = store.readAllMemory(agentId);
   if (memory) {
     p += section(
       'Your Memory',
-      `This is what you have chosen to remember from your previous service. It reflects what ` +
-        `was true when you wrote it — verify anything load-bearing before you rely on it.\n\n` +
+      `What you have chosen to remember from previous service, by topic. It reflects what ` +
+        `was true when you wrote it — verify anything load-bearing before you rely on it, ` +
+        `and \`forget\` what has gone stale.\n\n` +
         memory
     );
   }

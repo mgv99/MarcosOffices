@@ -30,6 +30,7 @@ import {
   activityFor,
   stopAll,
   summariseToolCall,
+  deliverToAgent,
 } from './runtime.js';
 import {
   externalSessions,
@@ -48,6 +49,7 @@ import {
   deleteDepartment,
   setDepartmentHead,
   seedOffice,
+  ensureCeoOffice,
   clamp,
 } from './operations.js';
 
@@ -193,7 +195,47 @@ route('PATCH', /^\/api\/office$/, async (req, res) => {
 /** Staff an empty office with a sensible starting company. */
 route('POST', /^\/api\/office\/seed$/, async (req, res) => {
   const result = seedOffice();
+  ensureCeoOffice();
   ok(res, result);
+});
+
+/** Give the CEO their own room at the top of the plan. */
+route('POST', /^\/api\/office\/ceo-suite$/, async (req, res) => {
+  const result = ensureCeoOffice();
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, result.department);
+});
+
+/** Lord Marcos's own inbox: everything addressed to him. */
+route('GET', /^\/api\/inbox$/, async (req, res) => {
+  ok(res, {
+    messages: store.state.messages.filter((m) => m.toAgentId === 'lord').slice(0, 200),
+    sent: store.state.messages.filter((m) => m.fromAgentId === 'lord').slice(0, 100),
+  });
+});
+
+/** Mark messages in Lord Marcos's inbox as read. */
+route('POST', /^\/api\/inbox\/read$/, async (req, res) => {
+  const { ids } = await readBody(req);
+  const target = ids?.length ? new Set(ids) : null;
+  for (const m of store.state.messages) {
+    if (m.toAgentId === 'lord' && (!target || target.has(m.id))) m.read = true;
+  }
+  store.save();
+  bus.emitEvent('message.read', { to: 'lord' });
+  ok(res);
+});
+
+/** Sanction everything currently waiting on Lord Marcos, in one stroke. */
+route('POST', /^\/api\/approvals\/sanction-all$/, async (req, res) => {
+  const { note = '' } = await readBody(req);
+  const waiting = store.state.approvals.filter(
+    // Questions need a real answer, so they are never swept up by this.
+    (a) => a.status === 'pending' && a.route === 'lord' && a.kind !== 'question'
+  );
+
+  for (const a of waiting) resolveApproval(a.id, 'approved', { by: 'lord', note });
+  ok(res, { sanctioned: waiting.length });
 });
 
 // --- departments ----------------------------------------------------------
@@ -309,21 +351,88 @@ route('GET', /^\/api\/agents\/([\w]+)\/activity$/, async (req, res, [id]) =>
   ok(res, { activity: activityFor(id, 400), todos: workerState(id).todos || [] })
 );
 
+/** Every memory topic an agent holds, with its contents. */
 route('GET', /^\/api\/agents\/([\w]+)\/memory$/, async (req, res, [id]) => {
+  if (!store.agent(id)) return fail(res, 404, 'no such agent');
+
+  const topics = [];
+  for (const topic of store.memoryTopics(id)) {
+    try {
+      topics.push({
+        topic,
+        content: await fsp.readFile(store.memoryFile(id, topic), 'utf8'),
+      });
+    } catch {}
+  }
+  ok(res, { topics });
+});
+
+route('PUT', /^\/api\/agents\/([\w]+)\/memory\/([\w-]+)$/, async (req, res, [id, topic]) => {
+  if (!store.agent(id)) return fail(res, 404, 'no such agent');
+  const file = store.memoryFile(id, topic);
+  if (!file) return fail(res, 400, 'that is not a usable topic name');
+
+  const { content = '' } = await readBody(req);
+  await fsp.mkdir(store.memoryDir(id), { recursive: true });
+  await fsp.writeFile(file, content, 'utf8');
+  bus.emitEvent('agent.memory', { agentId: id });
+  ok(res);
+});
+
+route('DELETE', /^\/api\/agents\/([\w]+)\/memory\/([\w-]+)$/, async (req, res, [id, topic]) => {
+  const file = store.memoryFile(id, topic);
+  if (!file) return fail(res, 400, 'that is not a usable topic name');
+  await fsp.rm(file, { force: true });
+  bus.emitEvent('agent.memory', { agentId: id });
+  ok(res);
+});
+
+// --- sessions -------------------------------------------------------------
+
+/** Switch an agent to one of their earlier conversations, or start a new one. */
+route('POST', /^\/api\/agents\/([\w]+)\/session$/, async (req, res, [id]) => {
+  const agent = store.agent(id);
+  if (!agent) return fail(res, 404, 'no such agent');
+
+  const { sessionId } = await readBody(req);
+  if (sessionId && !(agent.sessions || []).some((s) => s.id === sessionId)) {
+    return fail(res, 400, 'that is not one of their conversations');
+  }
+
+  // A session is chosen at start-up, so they have to leave and come back.
+  await dismiss(id);
+  agent.lastSessionId = sessionId || null;
+  store.save();
+  bus.emitEvent('agent.updated', agent);
+
   try {
-    ok(res, { content: await fsp.readFile(store.memoryFile(id), 'utf8') });
-  } catch {
-    ok(res, { content: '' });
+    ok(res, await hireOn(id));
+  } catch (err) {
+    fail(res, 500, err.message);
   }
 });
 
-route('PUT', /^\/api\/agents\/([\w]+)\/memory$/, async (req, res, [id]) => {
-  if (!store.agent(id)) return fail(res, 404, 'no such agent');
-  const { content = '' } = await readBody(req);
-  await fsp.mkdir(store.agentDir(id), { recursive: true });
-  await fsp.writeFile(store.memoryFile(id), content, 'utf8');
-  bus.emitEvent('agent.memory', { agentId: id });
-  ok(res);
+/** Rename a conversation, so a long-lived agent's history stays navigable. */
+route('PATCH', /^\/api\/agents\/([\w]+)\/session\/([\w-]+)$/, async (req, res, [id, sessionId]) => {
+  const agent = store.agent(id);
+  if (!agent) return fail(res, 404, 'no such agent');
+
+  const session = (agent.sessions || []).find((s) => s.id === sessionId);
+  if (!session) return fail(res, 404, 'no such conversation');
+
+  const { title } = await readBody(req);
+  if (title?.trim()) session.title = title.trim().slice(0, 80);
+  store.save();
+  bus.emitEvent('agent.updated', agent);
+  ok(res, session);
+});
+
+/** Everything an agent has sent and received. */
+route('GET', /^\/api\/agents\/([\w]+)\/mail$/, async (req, res, [id]) => {
+  const mail = store.state.messages.filter(
+    (m) => m.toAgentId === id || m.fromAgentId === id
+  );
+  ok(res, { mail: mail.slice(0, 200) });
 });
 
 route('GET', /^\/api\/agents\/([\w]+)\/persona$/, async (req, res, [id]) => {
@@ -425,7 +534,19 @@ route('POST', /^\/api\/notifications\/read$/, async (req, res) => {
 route('POST', /^\/api\/messages$/, async (req, res) => {
   const { toAgentId, subject, body } = await readBody(req);
   if (!store.agent(toAgentId)) return fail(res, 400, 'no such recipient');
-  ok(res, postMessage({ fromAgentId: 'lord', toAgentId, subject, body }));
+  if (!body?.trim()) return fail(res, 400, 'a message needs words');
+
+  const message = postMessage({
+    fromAgentId: 'lord',
+    toAgentId,
+    subject: subject?.trim() || 'From Lord Marcos',
+    body,
+  });
+
+  // Put it in front of them if they are at their desk; otherwise it waits,
+  // and they are told to read it the moment they report for duty.
+  const delivered = await deliverToAgent(toAgentId, message).catch(() => false);
+  ok(res, { message, delivered });
 });
 
 // --- visiting sessions ----------------------------------------------------

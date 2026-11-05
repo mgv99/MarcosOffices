@@ -87,11 +87,21 @@ export function buildOfficeServer(agentId) {
           body: z.string().describe('The message itself. Be specific and brief.'),
         },
         async ({ to, subject, body }) => {
+          const lord = store.state.office.lordName || 'Lord Marcos';
+
+          // Writing to Lord Marcos puts it in his own inbox, not an agent's.
+          if (/^(lord|lord marcos|marcos)$/i.test(String(to).trim()) ||
+              String(to).trim().toLowerCase() === lord.toLowerCase()) {
+            postMessage({ fromAgentId: agentId, toAgentId: 'lord', subject, body });
+            return text(`Your message has been placed in ${lord}'s inbox.`);
+          }
+
           const recipient = findAgent(to);
           if (!recipient) {
             const names = store.state.agents.map((a) => a.name).join(', ');
             return text(
-              `There is no one by the name "${to}" in this office. The staff are: ${names}.`
+              `There is no one by the name "${to}" in this office. The staff are: ` +
+                `${names}. You may also write to "${lord}" himself.`
             );
           }
           if (recipient.id === agentId) {
@@ -210,37 +220,121 @@ export function buildOfficeServer(agentId) {
         'Write something to your private memory, which survives between sessions. ' +
           'Record what you would otherwise have to rediscover: conventions, decisions ' +
           'and why they were made, dead ends, the shape of a codebase. Do not record ' +
-          'trivia or anything the code itself already says.',
+          'trivia or anything the code itself already says. Memory is kept in topics ' +
+          '— file them sensibly so you can find them again.',
         {
+          topic: z
+            .string()
+            .describe(
+              'The topic file to file this under, as a short slug: "codebase", ' +
+                '"build-system", "lord-preferences", "dead-ends". Reuse an existing ' +
+                'topic where one fits — check with list_memory first.'
+            ),
           note: z.string().describe('The fact to remember, in one or two sentences.'),
         },
-        async ({ note }) => {
+        async ({ topic, note }) => {
           const agent = self();
           if (!agent?.memoryEnabled) {
             return text('Your memory has been disabled by Lord Marcos. Nothing was written.');
           }
-          const file = store.memoryFile(agentId);
-          await fsp.mkdir(path.dirname(file), { recursive: true });
+          const file = store.ensureMemoryFile(agentId, topic);
+          if (!file) return text(`"${topic}" is not a usable topic name.`);
+
           const stamp = new Date().toISOString().slice(0, 10);
           await fsp.appendFile(file, `- (${stamp}) ${note.trim()}\n`, 'utf8');
           bus.emitEvent('agent.memory', { agentId });
-          return text('Committed to memory.');
+          return text(`Committed to memory under "${topic}".`);
+        }
+      ),
+
+      tool(
+        'list_memory',
+        'List the topics you hold in memory, so you can file new notes alongside ' +
+          'what is already there rather than scattering them.',
+        {},
+        async () => {
+          const topics = store.memoryTopics(agentId);
+          return text(
+            topics.length
+              ? `You hold memory under: ${topics.join(', ')}.`
+              : 'You hold no memory yet.'
+          );
         }
       ),
 
       tool(
         'recall',
-        'Read back your private memory from previous service.',
-        {},
-        async () => {
+        'Read back your private memory. Give a topic to read one, or omit it to read ' +
+          'everything you hold.',
+        {
+          topic: z.string().optional().describe('The topic to read. Omit for all of them.'),
+        },
+        async ({ topic }) => {
           const agent = self();
           if (!agent?.memoryEnabled) return text('Your memory has been disabled.');
-          try {
-            const content = await fsp.readFile(store.memoryFile(agentId), 'utf8');
-            return text(content.trim() || 'Your memory is empty.');
-          } catch {
-            return text('Your memory is empty.');
+
+          if (topic) {
+            const file = store.memoryFile(agentId, topic);
+            try {
+              const content = await fsp.readFile(file, 'utf8');
+              return text(content.trim() || `Nothing recorded under "${topic}".`);
+            } catch {
+              return text(
+                `Nothing recorded under "${topic}". You hold: ` +
+                  `${store.memoryTopics(agentId).join(', ') || 'nothing'}.`
+              );
+            }
           }
+
+          const all = store.readAllMemory(agentId);
+          return text(all || 'Your memory is empty.');
+        }
+      ),
+
+      tool(
+        'forget',
+        'Remove memory that is no longer true or no longer useful. Do this ' +
+          'deliberately — stale memory is worse than none, because it is believed. ' +
+          'Review your topics now and then and clear what has gone out of date.',
+        {
+          topic: z.string().describe('The topic to prune.'),
+          matching: z
+            .string()
+            .optional()
+            .describe(
+              'Drop only the lines containing this text. Omit to clear the whole topic.'
+            ),
+        },
+        async ({ topic, matching }) => {
+          const agent = self();
+          if (!agent?.memoryEnabled) return text('Your memory has been disabled.');
+
+          const file = store.memoryFile(agentId, topic);
+          if (!file) return text(`"${topic}" is not a usable topic name.`);
+
+          let content;
+          try {
+            content = await fsp.readFile(file, 'utf8');
+          } catch {
+            return text(`You hold nothing under "${topic}".`);
+          }
+
+          if (!matching) {
+            await fsp.rm(file, { force: true });
+            bus.emitEvent('agent.memory', { agentId });
+            return text(`Forgot everything under "${topic}".`);
+          }
+
+          const lines = content.split('\n');
+          const kept = lines.filter(
+            (l) => !(l.trim().startsWith('-') && l.toLowerCase().includes(matching.toLowerCase()))
+          );
+          const dropped = lines.length - kept.length;
+          await fsp.writeFile(file, kept.join('\n'), 'utf8');
+          bus.emitEvent('agent.memory', { agentId });
+          return text(
+            dropped ? `Forgot ${dropped} note(s) under "${topic}".` : 'Nothing matched.'
+          );
         }
       ),
 
@@ -357,6 +451,9 @@ export function buildOfficeServer(agentId) {
         },
         async ({ subject, body }) => {
           const agent = self();
+          // A petition is a message to his inbox, so he can reply to it, plus
+          // a notification so he notices it arriving.
+          postMessage({ fromAgentId: agentId, toAgentId: 'lord', subject, body });
           notify({
             kind: 'petition',
             title: `${agent.name} petitions you: ${subject}`,

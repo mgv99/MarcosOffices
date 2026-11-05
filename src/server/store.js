@@ -161,7 +161,30 @@ class Store {
       this.state = defaultState();
       await this.flush();
     }
+
+    this._migrateLegacyMemory();
     return this.state;
+  }
+
+  /**
+   * Memory used to be one flat MEMORY.md per agent. Fold any left over into
+   * the topic layout as 'general', once, at start-up — otherwise an agent who
+   * has not been called to duty since the change looks like they remember
+   * nothing.
+   */
+  _migrateLegacyMemory() {
+    for (const agent of this.state.agents) {
+      const legacy = path.join(this.agentDir(agent.id), 'MEMORY.md');
+      const general = this.memoryFile(agent.id, 'general');
+      try {
+        if (!fs.existsSync(legacy) || fs.existsSync(general)) continue;
+        fs.mkdirSync(this.memoryDir(agent.id), { recursive: true });
+        fs.renameSync(legacy, general);
+        console.log(`[store] moved ${agent.name}'s memory into topic "general"`);
+      } catch {
+        /* leave it where it is rather than lose it */
+      }
+    }
   }
 
   /** Fill in fields added by later versions so old files keep working. */
@@ -184,6 +207,9 @@ class Store {
     // front. Grow the old ones so the new seating plan fits inside them.
     for (const d of s.departments) {
       d.headAgentId ??= null;
+      // The CEO's suite is deliberately small and single-seated; growing it
+      // to the standard room size would put it on top of the floor below.
+      if (d.isCeoOffice) continue;
       if ((d.h || 0) < 16) d.h = 16;
       if ((d.w || 0) < 14) d.w = 14;
       if ((d.seats || 0) < 9) d.seats = 9;
@@ -204,6 +230,10 @@ class Store {
       a.memoryEnabled ??= true;
       a.canManageOffice ??= false;
       a.stats ??= emptyStats();
+      // Every conversation this agent has held, newest last.
+      a.sessions ??= a.lastSessionId
+        ? [{ id: a.lastSessionId, startedAt: a.createdAt || Date.now(), title: 'Session 1' }]
+        : [];
     }
   }
 
@@ -288,30 +318,59 @@ class Store {
     return path.join(AGENTS_DIR, id);
   }
 
-  memoryFile(id) {
-    return path.join(this.agentDir(id), 'MEMORY.md');
+  /** Where an agent's memory files live, one per topic. */
+  memoryDir(id) {
+    return path.join(this.agentDir(id), 'memory');
+  }
+
+  /** Topic names become file names, so keep them to a plain slug. */
+  memoryFile(id, topic = 'general') {
+    const slug = String(topic).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
+    if (!slug) return null;
+    const file = path.resolve(this.memoryDir(id), `${slug}.md`);
+    return file.startsWith(path.resolve(this.memoryDir(id))) ? file : null;
+  }
+
+  /** Every memory topic an agent holds. */
+  memoryTopics(id) {
+    try {
+      return fs
+        .readdirSync(this.memoryDir(id))
+        .filter((f) => f.endsWith('.md'))
+        .map((f) => f.slice(0, -3))
+        .sort();
+    } catch {
+      return [];
+    }
   }
 
   /**
-   * Make sure an agent's memory file exists, with a header explaining what it
-   * is. Without this the file only appeared the first time an agent happened
-   * to call `remember`, so a new hire looked like they had no memory at all.
+   * Make sure an agent has somewhere to remember things, and migrate the old
+   * single MEMORY.md into the topic-based layout if one is left over.
    */
-  ensureMemoryFile(id) {
+  ensureMemoryFile(id, topic = 'general') {
     const agent = this.agent(id);
     if (!agent) return null;
 
-    const file = this.memoryFile(id);
+    const file = this.memoryFile(id, topic);
+    if (!file) return null;
+
     try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.mkdirSync(this.memoryDir(id), { recursive: true });
+
+      // One flat MEMORY.md was the old shape; fold it in as 'general'.
+      const legacy = path.join(this.agentDir(id), 'MEMORY.md');
+      const general = this.memoryFile(id, 'general');
+      if (fs.existsSync(legacy) && !fs.existsSync(general)) {
+        fs.renameSync(legacy, general);
+      }
+
       if (!fs.existsSync(file)) {
         fs.writeFileSync(
           file,
-          `# ${agent.name} — memory\n\n` +
-            `${agent.title}${agent.departmentId ? '' : ''} at ${this.state.office.name}.\n\n` +
-            `What I have chosen to remember from my service. Written by me with the\n` +
-            `\`remember\` tool, and readable by ${this.state.office.lordName || 'Lord Marcos'}.\n\n` +
-            `## What I have learned\n\n`,
+          `# ${agent.name} — ${topic}\n\n` +
+            `What I have chosen to remember about ${topic}. Written by me with the\n` +
+            `\`remember\` tool, and readable by ${this.state.office.lordName || 'Lord Marcos'}.\n\n`,
           'utf8'
         );
       }
@@ -319,6 +378,20 @@ class Store {
     } catch {
       return null;
     }
+  }
+
+  /** Everything an agent remembers, as one block for their system prompt. */
+  readAllMemory(id, { limit = 20000 } = {}) {
+    const parts = [];
+    for (const topic of this.memoryTopics(id)) {
+      try {
+        const body = fs.readFileSync(this.memoryFile(id, topic), 'utf8').trim();
+        // Skip files that only carry the generated header.
+        const lines = body.split('\n').filter((l) => l.trim().startsWith('-'));
+        if (lines.length) parts.push(`### ${topic}\n${lines.join('\n')}`);
+      } catch {}
+    }
+    return parts.join('\n\n').slice(0, limit);
   }
 }
 

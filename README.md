@@ -37,6 +37,14 @@ is in session.
 
 ## The office
 
+Two views of the same company, switched at the top left:
+
+- **Office** — the floor plan. The CEO has a one-desk suite centred above the floor;
+  the departments sit in rows of three beneath it.
+- **Hierarchy** — the chain of command as an org chart, the CEO at the top and each
+  agent hanging under their supervisor. Cards are tinted with their department's
+  colour, so the two readings of the office agree rather than compete.
+
 Departments are rooms on a tile grid; each has a seat count, its own decor, and its
 own context inherited by everyone who serves there.
 
@@ -58,17 +66,38 @@ Drag to pan, scroll to zoom, click an agent to open their panel. Every sprite is
 in code from a hash of the agent's id — there are no image files, and each member of
 staff looks like themselves permanently.
 
+### The three desks at the top
+
+- **Sanctions** — everything waiting on your word, with **Sanction all** for the
+  routine ones. Questions are never swept up by it: they need a real answer.
+- **Inbox** — what the staff have written to *you*. Reports, petitions, findings.
+  Reply to the sender, or pass it on to someone else.
+- **Dispatches** — the office's event log: tasks that finished, shifts that ran on
+  their own, agents that failed. Things that happened while you were looking
+  elsewhere. Click one to go to the agent it concerns.
+
+Every pending item carries an **→ Open chat** button, and toasts in the bottom-left
+take you to the agent they name.
+
 ### Watching an agent
 
-Each agent has four tabs, and the first two are deliberately different things:
+Each agent has five tabs, and the first two are deliberately different things:
 
 - **Orders** — the full terminal, as the CLI shows it: your orders, their prose, every
   tool call with its arguments, and what each one returned. Long output and tool
   arguments fold away; markdown is rendered.
 - **Activity** — the milestone view: their current plan, which steps are done, and the
   notable events (leave requested, task finished, failures). No raw tool traffic.
+- **Mail** — everything they have received and sent.
 - **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
-- **Memory** — their private memory file, editable.
+- **Memory** — their memory, one file per topic, editable.
+
+Their panel also shows which **project** they are posted to (changeable in place),
+which **session** they are on — an agent keeps every conversation they have held, and
+you can switch between them or start a new one — and the `claude --resume` command.
+
+New staff are hired on `bypassPermissions` with tools auto-approved, so they get on
+with the work; decisions still go to the CEO, and anything grave still reaches you.
 
 ### Taking an agent into a real terminal
 
@@ -161,9 +190,11 @@ Claude Code's own `AskUserQuestion` cannot be answered from a hook (there is no 
 hand a tool its result), so the office intercepts it and routes it through the same
 queue, telling the agent to use `ask_lord` next time.
 
-Each agent's memory file is created the day they are hired, at
-`~/.marcosoffices/agents/<id>/MEMORY.md`, and they are instructed to write to it
-before finishing any task of substance.
+Memory is kept per topic, at `~/.marcosoffices/agents/<id>/memory/<topic>.md`. Agents
+file notes under a topic they choose (`codebase`, `build-system`, `lord-preferences`,
+`dead-ends`), list what they already hold so they file alongside it rather than
+scattering, and **prune** with `forget` — stale memory is worse than none, because it
+is believed. An older flat `MEMORY.md` is folded in as `general` on first start.
 
 Milestones come from `report_progress` rather than from Claude Code's own todo list:
 the Agent SDK does not expose `TodoWrite` to a session, so agents are instructed to

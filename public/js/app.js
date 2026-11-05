@@ -6,9 +6,10 @@
  */
 import { api, connectEvents } from './api.js';
 import { OfficeMap } from './office.js';
-import { STATUS_COLORS, THEME_NAMES, agentSprite } from './sprites.js';
+import { STATUS_COLORS, THEME_NAMES, agentSprite, themeFor } from './sprites.js';
 import { markdownNode } from './markdown.js';
 import { openWindow, closeWindow, isWindowOpen, refreshWindow } from './windows.js';
+import { HierarchyTree } from './tree.js';
 
 // --- tiny DOM helpers -------------------------------------------------------
 
@@ -30,7 +31,10 @@ function h(spec, props = {}, children = []) {
   }
 
   for (const child of [].concat(children)) {
-    if (child == null || child === false) continue;
+    // `cond && node` yields 0 for an empty-length condition, which would
+    // otherwise print a stray "0". Text always arrives via the `text` prop,
+    // so a bare 0 here is never something we meant to show.
+    if (child == null || child === false || child === 0) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return el;
@@ -51,12 +55,26 @@ function money(n) {
   return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
 }
 
-function toast({ title, body = '', kind = 'info', timeout = 6000 }) {
-  const el = h('div.toast', { 'data-kind': kind }, [
+/**
+ * A passing notice. When it names an agent, clicking it takes you there —
+ * a notification you cannot act on is just noise.
+ */
+function toast({ title, body = '', kind = 'info', timeout = 6000, agentId = null }) {
+  const el = h('div.toast', { 'data-kind': kind, 'data-goes-somewhere': String(!!agentId) }, [
     h('div.toast-title', { text: title }),
     body && h('div.toast-body', { text: String(body).slice(0, 240) }),
+    agentId && h('div.toast-go', { text: 'Click to open →' }),
   ]);
-  el.addEventListener('click', () => el.remove());
+
+  el.addEventListener('click', () => {
+    if (agentId && agentById(agentId)) {
+      openAgent(agentId);
+      map.focusAgent(agentId);
+      if (view === 'tree') tree.select(agentId);
+    }
+    el.remove();
+  });
+
   $('#toasts').append(el);
   setTimeout(() => el.remove(), timeout);
 }
@@ -66,13 +84,15 @@ function toast({ title, body = '', kind = 'info', timeout = 6000 }) {
 const state = {
   snapshot: null,
   selectedAgentId: null,
-  panel: null, // 'agent' | 'hq' | 'staff' | ...
+  panel: null, // 'agent' | 'sanctions' | 'inbox' | 'dispatches' | 'staff' | ...
   agentTab: 'orders',
   activity: [], // for the open agent
   todos: [], // their current task list
 };
 
 let map = null;
+let tree = null;
+let view = 'office'; // 'office' | 'tree'
 
 const agentById = (id) => state.snapshot?.agents.find((a) => a.id === id) || null;
 const deptById = (id) => state.snapshot?.departments.find((d) => d.id === id) || null;
@@ -84,6 +104,18 @@ const pendingApprovals = () =>
 const unreadNotifications = () =>
   (state.snapshot?.notifications || []).filter((n) => !n.read);
 
+/** Everything the staff have addressed to Lord Marcos. */
+const lordInbox = () =>
+  (state.snapshot?.messages || []).filter((m) => m.toAgentId === 'lord');
+
+const unreadInbox = () => lordInbox().filter((m) => !m.read);
+
+/** Resolve a message sender for display: agents, or the Lord himself. */
+function senderName(id) {
+  if (id === 'lord') return state.snapshot?.office?.lordName || 'Lord Marcos';
+  return agentById(id)?.name || 'unknown';
+}
+
 // --- boot -------------------------------------------------------------------
 
 async function boot() {
@@ -94,6 +126,10 @@ async function boot() {
     onSelectVisitor: (id) => openVisitor(id),
     onSelectDepartment: (id) => openPanel('departments', { highlight: id }),
     onBackground: () => closePanel(),
+  });
+
+  tree = new HierarchyTree($('#tree-view'), {
+    onSelectAgent: (id) => openAgent(id),
   });
 
   await refresh();
@@ -112,8 +148,31 @@ async function boot() {
 async function refresh() {
   state.snapshot = await api.state();
   map.setState(state.snapshot);
+  tree?.setState(state.snapshot);
+  if (view === 'tree') tree.render();
   renderAuth();
   renderBadges();
+}
+
+/** Swap between the floor plan and the chain of command. */
+function setView(next) {
+  view = next;
+  $('#office-canvas').hidden = next !== 'office';
+  $('#tree-view').hidden = next !== 'tree';
+  $('#btn-view-office').dataset.active = String(next === 'office');
+  $('#btn-view-tree').dataset.active = String(next === 'tree');
+  // Zoom controls belong to the floor plan only.
+  for (const id of ['#btn-fit', '#btn-zoom-in', '#btn-zoom-out']) {
+    $(id).hidden = next !== 'office';
+  }
+
+  if (next === 'tree') {
+    tree.setState(state.snapshot);
+    tree.render();
+    tree.select(state.selectedAgentId);
+  } else {
+    map.resize();
+  }
 }
 
 function wireChrome() {
@@ -125,6 +184,8 @@ function wireChrome() {
   }
 
   $('#side-close').addEventListener('click', closePanel);
+  $('#btn-view-office').addEventListener('click', () => setView('office'));
+  $('#btn-view-tree').addEventListener('click', () => setView('tree'));
   $('#btn-fit').addEventListener('click', () => map.fit());
   $('#btn-zoom-in').addEventListener('click', () => {
     map.camera.zoomIndex = Math.min(map.maxZoomIndex, map.camera.zoomIndex + 1);
@@ -217,10 +278,18 @@ function renderAuth() {
 }
 
 function renderBadges() {
-  const count = pendingApprovals().length + unreadNotifications().length;
-  const badge = $('#badge-hq');
-  badge.hidden = count === 0;
-  badge.textContent = String(count);
+  const counts = {
+    sanctions: pendingApprovals().length,
+    inbox: unreadInbox().length,
+    dispatches: unreadNotifications().length,
+  };
+
+  for (const [name, count] of Object.entries(counts)) {
+    const badge = $(`#badge-${name}`);
+    if (!badge) continue;
+    badge.hidden = count === 0;
+    badge.textContent = String(count);
+  }
 }
 
 function renderLegend() {
@@ -291,7 +360,7 @@ async function handleEvent({ type, data }) {
     case 'agent.stats': {
       const agent = agentById(data.agentId);
       if (agent) agent.stats = data.stats;
-      if (state.panel === 'agent' || state.panel === 'hq' || state.panel === 'staff') {
+      if (['agent', 'dispatches', 'staff'].includes(state.panel)) {
         renderPanel();
       }
       break;
@@ -318,6 +387,7 @@ async function handleEvent({ type, data }) {
           body: data.title,
           kind: 'approval',
           timeout: 12000,
+          agentId: data.agentId,
         });
       }
       break;
@@ -337,14 +407,26 @@ async function handleEvent({ type, data }) {
     case 'notification.new': {
       state.snapshot?.notifications.unshift(data);
       renderBadges();
-      toast({ title: data.title, body: data.body, kind: data.kind });
+      toast({ title: data.title, body: data.body, kind: data.kind, agentId: data.agentId });
+      if (state.panel === 'dispatches') renderPanel();
       break;
     }
 
-    case 'message.new':
+    case 'message.new': {
       state.snapshot?.messages.unshift(data);
-      if (state.panel === 'hq') renderPanel();
+      renderBadges();
+      if (data.toAgentId === 'lord') {
+        toast({
+          title: `${senderName(data.fromAgentId)} writes to you`,
+          body: data.subject,
+          kind: 'petition',
+          timeout: 10000,
+          agentId: data.fromAgentId,
+        });
+      }
+      if (state.panel === 'inbox' || state.panel === 'agent') renderPanel();
       break;
+    }
 
     // Anything structural: take a fresh snapshot rather than patching by hand.
     case 'agent.created':
@@ -370,8 +452,8 @@ async function reloadApprovals() {
   const { approvals } = await api.approvals();
   if (state.snapshot) state.snapshot.approvals = approvals;
   renderBadges();
-  if (state.panel === 'hq') renderPanel();
-  if (state.panel === 'agent') renderPanel();
+  // The agent panel keeps its own live cards, so only re-render the lists.
+  if (state.panel === 'sanctions') renderPanel();
 }
 
 // --- panel plumbing ---------------------------------------------------------
@@ -398,6 +480,7 @@ async function openAgent(id) {
   state.selectedAgentId = id;
   state.agentTab = 'orders';
   map.select(id);
+  tree?.select(id);
   openPanel('agent');
 
   try {
@@ -413,14 +496,20 @@ async function openAgent(id) {
 
 function setPanel(title, body) {
   $('#side-title').textContent = title;
-  $('#side-body').replaceChildren(...[].concat(body));
+  // replaceChildren stringifies whatever it is given, so a `cond ? node : null`
+  // would print "null". Drop the empties the way h() does.
+  $('#side-body').replaceChildren(
+    ...[].concat(body).filter((n) => n != null && n !== false && n !== 0)
+  );
 }
 
 function renderPanel() {
   switch (state.panel) {
     case 'agent': return renderAgentPanel();
     case 'visitor': return renderVisitorPanel();
-    case 'hq': return renderHqPanel();
+    case 'sanctions': return renderSanctionsPanel();
+    case 'inbox': return renderInboxPanel();
+    case 'dispatches': return renderDispatchesPanel();
     case 'staff': return renderStaffPanel();
     case 'departments': return renderDepartmentsPanel();
     case 'projects': return renderProjectsPanel();
@@ -474,6 +563,7 @@ function renderAgentPanel() {
       }),
     ]),
     projectRow(agent),
+    sessionRow(agent),
     resumeRow(agent),
 
     h('div.actions', {}, [
@@ -505,6 +595,7 @@ function renderAgentPanel() {
     [
       ['orders', 'Orders'],
       ['activity', 'Activity'],
+      ['mail', 'Mail'],
       ['config', 'Configuration'],
       ['memory', 'Memory'],
     ],
@@ -522,6 +613,7 @@ function renderAgentPanel() {
 
   if (state.agentTab === 'orders') renderOrders(body, agent);
   else if (state.agentTab === 'activity') renderActivity(body);
+  else if (state.agentTab === 'mail') renderAgentMail(body, agent);
   else if (state.agentTab === 'config') renderAgentConfig(body, agent);
   else renderAgentMemory(body, agent);
 }
@@ -573,6 +665,61 @@ function projectRow(agent) {
         : state.snapshot.projects.length
           ? 'They work from your home directory until posted.'
           : 'No projects yet — add one under Projects.',
+    }),
+  ]);
+}
+
+/**
+ * An agent keeps every conversation they have held. Switching between them
+ * restarts the agent on that conversation, so they pick it up with its full
+ * history; starting a new one leaves the old ones untouched.
+ */
+function sessionRow(agent) {
+  const sessions = agent.sessions || [];
+  if (!sessions.length) return null;
+
+  const current = agent.lastSessionId;
+
+  const picker = h(
+    'select',
+    {
+      onchange: async (e) => {
+        const sessionId = e.target.value || null;
+        await guard(
+          () => api.switchSession(agent.id, sessionId),
+          sessionId ? 'Picked up that conversation.' : 'Started a fresh conversation.'
+        );
+      },
+    },
+    [
+      ...sessions.map((s, i) =>
+        h('option', { value: s.id, selected: s.id === current ? true : null }, [
+          `${s.title || `Session ${i + 1}`} — ${new Date(s.startedAt).toLocaleDateString()}`,
+        ])
+      ),
+      h('option', { value: '' }, ['+ Start a new conversation']),
+    ]
+  );
+
+  const rename = h('button.btn.btn-sm', {
+    text: '✎',
+    title: 'Rename this conversation',
+    onclick: async () => {
+      const session = sessions.find((s) => s.id === current);
+      if (!session) return;
+      const title = prompt('Name this conversation:', session.title || '');
+      if (!title?.trim()) return;
+      await guard(() => api.renameSession(agent.id, current, title), 'Renamed.');
+    },
+  });
+
+  return h('div.project-row', {}, [
+    h('div.project-label', { text: 'SESSION' }),
+    h('div.resume-line', {}, [picker, rename]),
+    h('div.card-sub', {
+      text:
+        `${sessions.length} conversation(s). Switching sends them home and brings ` +
+        `them back on the one you choose.`,
     }),
   ]);
 }
@@ -1317,28 +1464,116 @@ function renderAgentConfig(container, agent) {
   );
 }
 
+/** Everything this agent has sent and received. */
+async function renderAgentMail(container, agent) {
+  container.replaceChildren(h('div.empty', { text: 'Opening their mail…' }));
+
+  let mail = [];
+  try {
+    mail = (await api.mail(agent.id)).mail;
+  } catch (err) {
+    return container.replaceChildren(h('div.empty', { text: err.message }));
+  }
+
+  const received = mail.filter((m) => m.toAgentId === agent.id);
+  const sent = mail.filter((m) => m.fromAgentId === agent.id);
+
+  const card = (m, incoming) =>
+    h('div.card', { style: { opacity: incoming && !m.read ? '1' : '.8' } }, [
+      h('div.card-head', {}, [
+        h('div', { style: { flex: '1', minWidth: '0' } }, [
+          h('div.card-title', { text: m.subject, style: { fontSize: '12px' } }),
+          h('div.card-sub', {
+            text: incoming
+              ? `from ${senderName(m.fromAgentId)} · ${timeOf(m.at)}`
+              : `to ${senderName(m.toAgentId)} · ${timeOf(m.at)}`,
+          }),
+        ]),
+        incoming && !m.read && h('span.pill', { text: 'UNREAD', style: { color: 'var(--gold)' } }),
+      ]),
+      markdownNode(String(m.body || '').slice(0, 4000)),
+    ]);
+
+  container.replaceChildren(
+    h('div.actions', { style: { marginBottom: '10px' } }, [
+      h('button.btn.btn-gold.btn-sm', {
+        text: '✎ Write to them',
+        onclick: () => openComposeForm({ toAgentId: agent.id }),
+      }),
+    ]),
+
+    h('h4', { text: `Received (${received.length})`, style: { margin: '6px 0 8px', color: 'var(--gold)' } }),
+    ...(received.length ? received.map((m) => card(m, true)) : [h('div.empty', { text: 'Nothing received.' })]),
+
+    h('h4', { text: `Sent (${sent.length})`, style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
+    ...(sent.length ? sent.map((m) => card(m, false)) : [h('div.empty', { text: 'Nothing sent.' })])
+  );
+}
+
+/** Their memory, one file per topic. */
 async function renderAgentMemory(container, agent) {
   container.replaceChildren(h('div.empty', { text: 'Reading their memory…' }));
-  const { content } = await api.memory(agent.id);
 
-  const area = h('textarea', { rows: 18, text: content });
+  let topics = [];
+  try {
+    topics = (await api.memory(agent.id)).topics;
+  } catch (err) {
+    return container.replaceChildren(h('div.empty', { text: err.message }));
+  }
+
+  const blocks = topics.map(({ topic, content }) => {
+    const area = h('textarea', { rows: 8, text: content });
+    return h('div.card', {}, [
+      h('div.card-head', {}, [
+        h('div.card-title', { text: topic, style: { flex: '1', fontSize: '12px' } }),
+        h('span.pill', {
+          text: `${content.split('\n').filter((l) => l.trim().startsWith('-')).length} note(s)`,
+        }),
+      ]),
+      area,
+      h('div.actions', {}, [
+        h('button.btn.btn-primary.btn-sm', {
+          text: 'Save',
+          onclick: () =>
+            guard(() => api.saveMemory(agent.id, topic, area.value), `"${topic}" saved.`),
+        }),
+        h('button.btn.btn-danger.btn-sm', {
+          text: 'Forget this topic',
+          onclick: async () => {
+            if (!confirm(`Delete everything ${agent.name} remembers about "${topic}"?`)) return;
+            await guard(() => api.deleteMemory(agent.id, topic), `"${topic}" forgotten.`);
+            renderPanel();
+          },
+        }),
+      ]),
+    ]);
+  });
+
+  const newTopic = h('input', { type: 'text', placeholder: 'build-system' });
+
   container.replaceChildren(
     h('div.hint', {
-      text: `Stored at ${state.snapshot.dataDir}\\agents\\${agent.id}\\MEMORY.md — they write to it themselves with the "remember" tool.`,
+      text:
+        `Kept as one file per topic under ${state.snapshot.dataDir}\\agents\\${agent.id}\\memory\\. ` +
+        `They file notes themselves with "remember", and prune stale ones with "forget".`,
       style: { marginBottom: '10px' },
     }),
-    area,
+
+    ...(blocks.length ? blocks : [h('div.empty', { text: 'They remember nothing yet.' })]),
+
+    h('h4', { text: 'Start a topic', style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
     h('div.actions', {}, [
-      h('button.btn.btn-primary', {
-        text: 'Save memory',
-        onclick: () => guard(() => api.saveMemory(agent.id, area.value), 'Memory rewritten.'),
-      }),
-      h('button.btn.btn-danger.btn-sm', {
-        text: 'Wipe',
+      newTopic,
+      h('button.btn.btn-sm', {
+        text: '+ Create',
         onclick: async () => {
-          if (!confirm(`Wipe everything ${agent.name} remembers?`)) return;
-          area.value = '';
-          await guard(() => api.saveMemory(agent.id, ''), 'Their memory is blank.');
+          const slug = newTopic.value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+          if (!slug) return toast({ title: 'Give the topic a name', kind: 'error' });
+          await guard(
+            () => api.saveMemory(agent.id, slug, `# ${agent.name} — ${slug}\n\n`),
+            `"${slug}" created.`
+          );
+          renderPanel();
         },
       }),
     ])
@@ -1461,30 +1696,201 @@ function openAdoptForm(visitor) {
 
 // --- HQ ---------------------------------------------------------------------
 
-function renderHqPanel() {
+/** Everything waiting on your word. */
+function renderSanctionsPanel() {
   const approvals = (state.snapshot.approvals || []).filter((a) => a.status === 'pending');
+  const mine = approvals.filter((a) => a.route === 'lord');
+  const withCeo = approvals.filter((a) => a.route !== 'lord');
+  // Questions need a real answer, so "sanction all" never sweeps them up.
+  const sweepable = mine.filter((a) => a.kind !== 'question');
+
+  setPanel('AWAITING SANCTION', [
+    h('div.card', {}, [
+      h('div.card-title', { text: `${mine.length} awaiting your word` }),
+      h('div.card-sub', {
+        text: withCeo.length
+          ? `${withCeo.length} more are with the CEO.`
+          : 'Nothing is with the CEO.',
+      }),
+      sweepable.length > 1 &&
+        h('div.actions', {}, [
+          h('button.btn.btn-primary.btn-sm', {
+            text: `✓ Sanction all (${sweepable.length})`,
+            onclick: async () => {
+              if (!confirm(`Sanction ${sweepable.length} pending request(s)?`)) return;
+              await guard(() => api.sanctionAll('Sanctioned in bulk.'), 'All sanctioned.');
+            },
+          }),
+          h('span.card-sub', { text: 'Questions are left for you to answer properly.' }),
+        ]),
+    ]),
+
+    ...(mine.length ? mine.map((a) => approvalCard(a)) : [h('div.empty', { text: 'Nothing awaits your word.' })]),
+
+    // A bare `length &&` would render a literal 0 when the list is empty.
+    withCeo.length
+      ? h('h4', { text: 'With the CEO', style: { margin: '18px 0 8px', color: 'var(--gold)' } })
+      : null,
+    ...withCeo.map((a) => approvalCard(a)),
+  ]);
+}
+
+/**
+ * Lord Marcos's own inbox: what the staff have written to him, and a way to
+ * answer or pass it on.
+ */
+function renderInboxPanel() {
+  const inbox = lordInbox();
+  const lord = state.snapshot.office.lordName || 'Lord Marcos';
+
+  setPanel('MY INBOX', [
+    h('div.card', {}, [
+      h('div.card-title', { text: `${inbox.length} message(s) to you` }),
+      h('div.card-sub', {
+        text:
+          'What the CEO, the heads of department and anyone else has written to you ' +
+          'directly — reports, petitions and findings. Reply to the sender, or pass ' +
+          'it to someone else.',
+      }),
+      h('div.actions', {}, [
+        h('button.btn.btn-gold.btn-sm', {
+          text: '✎ Write to someone',
+          onclick: () => openComposeForm(),
+        }),
+        unreadInbox().length
+          ? h('button.btn.btn-sm', {
+              text: 'Mark all read',
+              onclick: () => guard(() => api.readInbox(), 'Inbox cleared.', true),
+            })
+          : null,
+      ]),
+    ]),
+
+    ...(inbox.length
+      ? inbox.map((m) => inboxCard(m))
+      : [h('div.empty', { text: `Nobody has written to ${lord} yet.` })]),
+  ]);
+}
+
+function inboxCard(message) {
+  const from = agentById(message.fromAgentId);
+
+  return h('div.card', { style: { opacity: message.read ? '.75' : '1' } }, [
+    h('div.card-head', {}, [
+      h('div', { style: { flex: '1', minWidth: '0' } }, [
+        h('div.card-title', { text: message.subject, style: { fontSize: '12px' } }),
+        h('div.card-sub', { text: `${senderName(message.fromAgentId)} · ${timeOf(message.at)}` }),
+      ]),
+      !message.read && h('span.pill', { text: 'NEW', style: { color: 'var(--gold)' } }),
+      from &&
+        h('button.btn.btn-sm', {
+          text: '→ Open chat',
+          onclick: () => {
+            openAgent(from.id);
+            map.focusAgent(from.id);
+          },
+        }),
+    ]),
+    markdownNode(String(message.body || '').slice(0, 6000)),
+    h('div.actions', {}, [
+      h('button.btn.btn-sm', {
+        text: '↩ Reply',
+        onclick: () => openComposeForm({ toAgentId: message.fromAgentId, subject: `Re: ${message.subject}`, quote: message.body }),
+      }),
+      h('button.btn.btn-sm', {
+        text: '➥ Pass on',
+        onclick: () => openComposeForm({ subject: `Fwd: ${message.subject}`, quote: message.body }),
+      }),
+    ]),
+  ]);
+}
+
+/** Write to a member of staff, optionally quoting what you are answering. */
+function openComposeForm({ toAgentId = '', subject = '', quote = '' } = {}) {
+  const to = h(
+    'select',
+    {},
+    [
+      h('option', { value: '' }, ['— choose a recipient —']),
+      ...state.snapshot.agents.map((a) =>
+        h('option', { value: a.id, selected: a.id === toAgentId ? true : null }, [
+          `${a.name} (${a.title})`,
+        ])
+      ),
+    ]
+  );
+  const subjectInput = h('input', { type: 'text', value: subject, placeholder: 'Subject' });
+  const bodyInput = h('textarea', {
+    rows: 8,
+    text: quote ? `\n\n---\nYou wrote:\n${String(quote).slice(0, 2000)}` : '',
+    placeholder: 'Your instruction…',
+  });
+
+  openModal('Write to a member of staff', [
+    field('To', to),
+    field('Subject', subjectInput),
+    field('Message', bodyInput),
+    h('div.hint', {
+      text: 'If they are on duty it is put in front of them at once; otherwise it waits in their inbox and they read it the moment they report.',
+      style: { marginBottom: '10px' },
+    }),
+    h('div.actions', {}, [
+      h('button.btn.btn-primary', {
+        text: 'Send',
+        onclick: async () => {
+          if (!to.value) return toast({ title: 'Choose a recipient', kind: 'error' });
+          try {
+            const result = await api.message(to.value, subjectInput.value, bodyInput.value);
+            closeModal();
+            await refresh();
+            if (state.panel) renderPanel();
+            toast({
+              title: result.delivered ? 'Delivered to their desk' : 'Waiting in their inbox',
+              kind: 'done',
+            });
+          } catch (err) {
+            toast({ title: 'Could not send it', body: err.message, kind: 'error' });
+          }
+        },
+      }),
+      h('button.btn', { text: 'Cancel', onclick: closeModal }),
+    ]),
+  ]);
+}
+
+/**
+ * The office's event log: what the staff did without being asked, and what
+ * went wrong. Useful for noticing a shift that ran, an agent that collapsed,
+ * or a task that finished while you were elsewhere.
+ */
+function renderDispatchesPanel() {
   const notifications = state.snapshot.notifications || [];
-  const messages = state.snapshot.messages || [];
   const working = state.snapshot.agents.filter((a) => statusOf(a.id) === 'working');
 
-  setPanel('HEADQUARTERS', [
+  setPanel('DISPATCHES', [
     h('div.card', {}, [
       h('div.card-title', { text: 'The office at a glance' }),
       h('div.card-sub', {
         text:
           `${state.snapshot.agents.length} staff · ${working.length} at work · ` +
-          `${approvals.length} awaiting sanction · ${state.snapshot.visitors.length} visiting session(s)`,
+          `${pendingApprovals().length} awaiting sanction · ` +
+          `${state.snapshot.visitors.length} visiting session(s)`,
       }),
     ]),
 
     ledgerCard(),
 
-    h('h4', { text: `Awaiting sanction (${approvals.length})`, style: { margin: '16px 0 8px', color: 'var(--gold)' } }),
-    approvals.length
-      ? h('div', {}, approvals.map((a) => approvalCard(a)))
-      : h('div.empty', { text: 'Nothing awaits your word.' }),
+    h('h4', {
+      text: `Events (${notifications.length})`,
+      style: { margin: '16px 0 8px', color: 'var(--gold)' },
+    }),
+    h('div.hint', {
+      text:
+        'Things that happened while you were looking elsewhere: tasks finished, ' +
+        'shifts that ran on their own, agents that failed. Click one to go to it.',
+      style: { marginBottom: '10px' },
+    }),
 
-    h('h4', { text: 'Dispatches', style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
     notifications.length
       ? h('div', {}, [
           h('button.btn.btn-sm', {
@@ -1492,32 +1898,26 @@ function renderHqPanel() {
             onclick: () => guard(() => api.readNotifications(), 'Cleared.', true),
             style: { marginBottom: '8px' },
           }),
-          ...notifications.slice(0, 40).map((n) =>
-            h('div.card', { style: { opacity: n.read ? '.55' : '1' } }, [
+          ...notifications.slice(0, 60).map((n) => {
+            const agent = n.agentId ? agentById(n.agentId) : null;
+            return h('div.card.dispatch', {
+              style: { opacity: n.read ? '.55' : '1', cursor: agent ? 'pointer' : 'default' },
+              onclick: agent
+                ? () => {
+                    openAgent(agent.id);
+                    map.focusAgent(agent.id);
+                  }
+                : null,
+            }, [
               h('div.card-head', {}, [
-                h('div.card-title', { text: n.title, style: { flex: '1' } }),
+                h('div.card-title', { text: n.title, style: { flex: '1', fontSize: '12px' } }),
                 h('span.card-sub', { text: timeOf(n.at) }),
               ]),
               n.body && h('div.card-sub', { text: String(n.body).slice(0, 400) }),
-            ])
-          ),
+            ]);
+          }),
         ])
-      : h('div.empty', { text: 'No dispatches.' }),
-
-    h('h4', { text: 'Internal mail', style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
-    messages.length
-      ? h('div', {}, messages.slice(0, 30).map((m) => {
-          const from = agentById(m.fromAgentId);
-          const to = agentById(m.toAgentId);
-          return h('div.card', {}, [
-            h('div.card-sub', {
-              text: `${from?.name || 'Lord Marcos'} → ${to?.name || '?'} · ${timeOf(m.at)}`,
-            }),
-            h('div.card-title', { text: m.subject, style: { fontSize: '12px' } }),
-            h('div.card-sub', { text: String(m.body).slice(0, 300) }),
-          ]);
-        }))
-      : h('div.empty', { text: 'The staff have not written to each other yet.' }),
+      : h('div.empty', { text: 'Nothing has happened behind your back.' }),
   ]);
 }
 
@@ -1722,8 +2122,10 @@ function approvalCard(approval, { compact = false } = {}) {
 
     approval.escalationNote && h('div.card-sub', { text: `CEO: ${approval.escalationNote}` }),
 
+    // The detail is markdown — usually a fenced JSON block — so render it
+    // rather than dumping the backticks on screen.
     !compact && approval.detail &&
-      h('div.approval-detail', { text: approval.detail }),
+      h('div.approval-detail', {}, [markdownNode(approval.detail)]),
     !compact && approval.risk &&
       h('div.card-sub', { text: `Risk: ${approval.risk}` }),
 
@@ -2004,21 +2406,81 @@ function openDepartmentForm() {
 function renderProjectsPanel() {
   const cards = state.snapshot.projects.map((project) => {
     const staff = state.snapshot.agents.filter((a) => a.projectId === project.id);
+
+    // Group the posted staff by the department they serve in, so a project
+    // reads as "who, from where" rather than a flat list of names.
+    const byDept = state.snapshot.departments
+      .map((dept) => ({
+        dept,
+        members: staff.filter((a) => a.departmentId === dept.id),
+      }))
+      .filter((g) => g.members.length);
+
+    const name = h('input', { type: 'text', value: project.name });
+    const directory = h('input', { type: 'text', value: project.directory });
+    const description = h('textarea', { rows: 2, text: project.description || '' });
+
     return h('div.card', {}, [
-      h('div.card-title', { text: project.name }),
-      h('div.card-sub', { text: project.directory }),
-      project.description && h('div.card-sub', { text: project.description }),
-      h('div.card-sub', {
-        text: staff.length ? `Staffed by ${staff.map((a) => a.name).join(', ')}` : 'No one is posted here.',
-      }),
-      h('div.actions', {}, [
-        h('button.btn.btn-danger.btn-sm', {
-          text: 'Remove',
-          onclick: async () => {
-            if (!confirm(`Remove the project ${project.name}? The directory itself is untouched.`)) return;
-            await guard(() => api.deleteProject(project.id), 'Project removed.');
-          },
-        }),
+      h('div.card-head', {}, [
+        h('div.card-title', { text: project.name, style: { flex: '1' } }),
+        h('span.pill', { text: `${staff.length} posted` }),
+      ]),
+
+      byDept.length
+        ? h(
+            'div.project-staff',
+            {},
+            byDept.map(({ dept, members }) =>
+              h('div.project-dept', { style: { '--dept': themeFor(dept.theme).wallTop } }, [
+                h('div.project-dept-name', { text: dept.name }),
+                h(
+                  'div.project-members',
+                  {},
+                  members.map((a) =>
+                    h('button.project-member', {
+                      text: `${a.name}${a.isCeo ? ' ♛' : ''}`,
+                      title: `${a.title} — open their console`,
+                      onclick: () => {
+                        openAgent(a.id);
+                        map.focusAgent(a.id);
+                      },
+                      style: { borderColor: STATUS_COLORS[statusOf(a.id)] },
+                    })
+                  )
+                ),
+              ])
+            )
+          )
+        : h('div.card-sub', { text: 'No one is posted here.' }),
+
+      h('details.project-edit', {}, [
+        h('summary', { text: 'Edit this project' }),
+        field('Name', name),
+        field('Directory', directory),
+        field('Description', description),
+        h('div.actions', {}, [
+          h('button.btn.btn-primary.btn-sm', {
+            text: 'Save',
+            onclick: () =>
+              guard(
+                () =>
+                  api.updateProject(project.id, {
+                    name: name.value,
+                    directory: directory.value,
+                    description: description.value,
+                  }),
+                'Project updated.'
+              ),
+          }),
+          h('span.spacer'),
+          h('button.btn.btn-danger.btn-sm', {
+            text: 'Remove',
+            onclick: async () => {
+              if (!confirm(`Remove the project ${project.name}? The directory itself is untouched.`)) return;
+              await guard(() => api.deleteProject(project.id), 'Project removed.');
+            },
+          }),
+        ]),
       ]),
     ]);
   });

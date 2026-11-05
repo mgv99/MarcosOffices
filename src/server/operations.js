@@ -49,6 +49,8 @@ export function findFreeSeat(departmentId, { excludeAgentId = null, forHead = fa
   for (let seat = 1; seat < dept.seats; seat++) {
     if (!taken.has(seat)) return seat;
   }
+  // A one-desk room has only the front desk; let whoever sits there use it.
+  if (dept.seats === 1 && !taken.has(HEAD_SEAT)) return HEAD_SEAT;
   return null;
 }
 
@@ -115,6 +117,45 @@ export function setDepartmentHead(departmentId, agentId) {
 export const ROOM_W = 14;
 export const ROOM_H = 16;
 
+/**
+ * Put every room back on the grid: the CEO's suite centred at the top, the
+ * departments in rows of three beneath it.
+ *
+ * Rooms accumulate from several places — the GUI, the seed, and agents
+ * proposing their own departments — so rather than patching positions one at
+ * a time, the whole plan is recomputed.
+ */
+export function relayoutFloor() {
+  const gap = 2;
+  const suite = store.state.departments.find((d) => d.isCeoOffice);
+  const floor = store.state.departments.filter((d) => !d.isCeoOffice);
+
+  floor.forEach((dept, i) => {
+    const col = i % 3;
+    const row = Math.floor(i / 3);
+    dept.w = dept.w || ROOM_W;
+    dept.h = dept.h || ROOM_H;
+    dept.x = 2 + col * (ROOM_W + gap);
+    dept.y = FLOOR_TOP + row * (ROOM_H + gap);
+  });
+
+  if (suite) {
+    // Centred over the middle column of the three-wide plan.
+    suite.x = 2 + (ROOM_W + gap) + Math.floor((ROOM_W - CEO_ROOM_W) / 2);
+    suite.y = 2;
+  }
+
+  store.save();
+  for (const d of store.state.departments) bus.emitEvent('department.updated', d);
+}
+
+/** The CEO's own room: one desk, small, and set apart above the floor. */
+export const CEO_ROOM_W = 8;
+export const CEO_ROOM_H = 9;
+
+/** Where the ordinary departments begin, leaving the CEO's suite above them. */
+const FLOOR_TOP = 2 + CEO_ROOM_H + 3;
+
 /** Find an unoccupied patch of floor for a new department. */
 export function placeDepartment({ x, y, w = ROOM_W, h = ROOM_H } = {}) {
   if (Number.isFinite(x) && Number.isFinite(y)) return { x, y, w, h };
@@ -125,7 +166,7 @@ export function placeDepartment({ x, y, w = ROOM_W, h = ROOM_H } = {}) {
   for (let row = 0; row < 12; row++) {
     for (let col = 0; col < 3; col++) {
       const nx = 2 + col * (w + gap);
-      const ny = 2 + row * (h + gap);
+      const ny = FLOOR_TOP + row * (h + gap);
       const clash = store.state.departments.some(
         (d) =>
           nx < d.x + d.w + gap &&
@@ -136,7 +177,88 @@ export function placeDepartment({ x, y, w = ROOM_W, h = ROOM_H } = {}) {
       if (!clash) return { x: nx, y: ny, w, h };
     }
   }
-  return { x: 2, y: 2 + store.state.departments.length * (h + gap), w, h };
+  return { x: 2, y: FLOOR_TOP + store.state.departments.length * (h + gap), w, h };
+}
+
+/**
+ * Give the CEO a room of their own, centred above the floor.
+ *
+ * The CEO sitting among a department muddled the hierarchy: they answer to
+ * nobody here, so they get their own one-desk suite at the top of the plan.
+ */
+export function ensureCeoOffice() {
+  const ceo = store.ceo();
+  if (!ceo) return { ok: false, error: 'this office has no CEO' };
+
+  // Match on the flag or the name: an earlier office (or an agent's own
+  // proposal) may have created the room before the flag existed, and we must
+  // adopt it rather than open a second one.
+  const candidates = store.state.departments.filter(
+    (d) => d.isCeoOffice || d.name.toLowerCase() === 'office of the ceo'
+  );
+  // Prefer a room already shaped like the suite; otherwise the first found.
+  let suite =
+    candidates.find((d) => d.isCeoOffice && d.seats === 1) || candidates[0] || null;
+
+  if (!suite) {
+    const result = createDepartment({
+      name: 'Office of the CEO',
+      context:
+        'The room at the top of the office. It holds one desk. Whoever sits here ' +
+        'answers to Lord Marcos alone and arbitrates everything below.',
+      seats: 1,
+      theme: 'executive',
+    });
+    if (!result.ok) return result;
+    suite = result.department;
+  }
+
+  suite.isCeoOffice = true;
+  suite.seats = 1;
+  suite.w = CEO_ROOM_W;
+  suite.h = CEO_ROOM_H;
+
+  if (ceo.departmentId !== suite.id) {
+    const previous = ceo.departmentId;
+    ceo.departmentId = suite.id;
+    ceo.seat = HEAD_SEAT;
+    suite.headAgentId = ceo.id;
+    ceo.supervisorId = null;
+
+    // Whoever is left behind now reports to that department's head, or to the
+    // CEO if the post is vacant.
+    const old = store.department(previous);
+    if (old && old.headAgentId === ceo.id) old.headAgentId = null;
+    for (const a of store.state.agents) {
+      if (a.departmentId === previous && a.supervisorId === ceo.id && !a.isCeo) {
+        a.supervisorId = old?.headAgentId || ceo.id;
+      }
+    }
+  }
+
+  // Now the CEO has moved, close any twin suites left standing empty. This
+  // has to come after the move, or the room the CEO just left still counts
+  // as occupied and survives.
+  suite.headAgentId = ceo.id;
+  for (const extra of candidates) {
+    if (extra.id === suite.id) continue;
+    const occupied = store.state.agents.some((a) => a.departmentId === extra.id);
+    if (!occupied) {
+      store.state.departments = store.state.departments.filter((d) => d.id !== extra.id);
+      bus.emitEvent('department.deleted', { id: extra.id });
+    } else {
+      // Someone else is in there; it is an ordinary room, not the suite.
+      extra.isCeoOffice = false;
+    }
+  }
+
+  // Lay the whole plan out last, so the suite lands clear of every room.
+  relayoutFloor();
+
+  store.save();
+  bus.emitEvent('department.updated', suite);
+  bus.emitEvent('agent.updated', ceo);
+  return { ok: true, department: suite, ceo };
 }
 
 // --- departments ------------------------------------------------------------
@@ -214,8 +336,11 @@ export function createAgent(body = {}) {
     briefing: body.briefing || '',
     model: body.model || 'sonnet',
     effort: body.effort || 'medium',
-    permissionMode: body.permissionMode || 'default',
-    approvalPolicy: body.approvalPolicy || { tools: 'lord', decisions: 'ceo' },
+    // Staff work unimpeded by default: Lord Marcos asked for agents that get
+    // on with it. Decisions still go to the CEO, and anything an agent judges
+    // grave still reaches him.
+    permissionMode: body.permissionMode || 'bypassPermissions',
+    approvalPolicy: body.approvalPolicy || { tools: 'auto', decisions: 'ceo' },
     allowedTools: body.allowedTools || [],
     disallowedTools: body.disallowedTools || [],
     enabledSkills: body.enabledSkills || [],

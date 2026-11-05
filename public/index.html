@@ -20,8 +20,14 @@
     </div>
 
     <div class="topbar-actions">
-      <button class="btn" data-panel="hq">
-        HQ <span class="badge" id="badge-hq" hidden>0</span>
+      <button class="btn" data-panel="sanctions">
+        Sanctions <span class="badge" id="badge-sanctions" hidden>0</span>
+      </button>
+      <button class="btn" data-panel="inbox">
+        Inbox <span class="badge" id="badge-inbox" hidden>0</span>
+      </button>
+      <button class="btn" data-panel="dispatches">
+        Dispatches <span class="badge" id="badge-dispatches" hidden>0</span>
       </button>
       <button class="btn" data-panel="staff">Staff</button>
       <button class="btn" data-panel="departments">Departments</button>
@@ -39,8 +45,13 @@
   <main class="main">
     <section class="map-area">
       <canvas id="office-canvas"></canvas>
+      <div class="tree-view" id="tree-view" hidden></div>
 
       <div class="map-controls">
+        <div class="view-switch">
+          <button class="btn btn-sm" id="btn-view-office" data-active="true">Office</button>
+          <button class="btn btn-sm" id="btn-view-tree">Hierarchy</button>
+        </div>
         <button class="btn btn-icon" id="btn-fit" title="Frame the whole office">⤢</button>
         <button class="btn btn-icon" id="btn-zoom-in" title="Zoom in">+</button>
         <button class="btn btn-icon" id="btn-zoom-out" title="Zoom out">−</button>

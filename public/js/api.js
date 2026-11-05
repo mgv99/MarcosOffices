@@ -25,6 +25,11 @@ export const api = {
 
   office: (patch) => request('PATCH', '/api/office', patch),
   seed: () => request('POST', '/api/office/seed'),
+  ceoSuite: () => request('POST', '/api/office/ceo-suite'),
+
+  inbox: () => request('GET', '/api/inbox'),
+  readInbox: (ids) => request('POST', '/api/inbox/read', { ids }),
+  sanctionAll: (note) => request('POST', '/api/approvals/sanction-all', { note }),
 
   createDepartment: (body) => request('POST', '/api/departments', body),
   setDepartmentHead: (id, agentId) =>
@@ -40,8 +45,16 @@ export const api = {
   order: (id, text) => request('POST', `/api/agents/${id}/order`, { text }),
   interrupt: (id) => request('POST', `/api/agents/${id}/interrupt`),
   activity: (id) => request('GET', `/api/agents/${id}/activity`),
+
   memory: (id) => request('GET', `/api/agents/${id}/memory`),
-  saveMemory: (id, content) => request('PUT', `/api/agents/${id}/memory`, { content }),
+  saveMemory: (id, topic, content) =>
+    request('PUT', `/api/agents/${id}/memory/${topic}`, { content }),
+  deleteMemory: (id, topic) => request('DELETE', `/api/agents/${id}/memory/${topic}`),
+
+  mail: (id) => request('GET', `/api/agents/${id}/mail`),
+  switchSession: (id, sessionId) => request('POST', `/api/agents/${id}/session`, { sessionId }),
+  renameSession: (id, sessionId, title) =>
+    request('PATCH', `/api/agents/${id}/session/${sessionId}`, { title }),
   persona: (id) => request('GET', `/api/agents/${id}/persona`),
 
   createProject: (body) => request('POST', '/api/projects', body),

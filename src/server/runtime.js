@@ -457,12 +457,20 @@ export class AgentWorker {
     this._consume();
     this.setStatus('idle');
 
-    // Anything a colleague sent while this agent was off duty.
+    // Anything a colleague sent while this agent was off duty. Telling them
+    // is not enough — they only act on a turn, so give them one.
     const unread = store.state.messages.filter(
       (m) => m.toAgentId === this.agentId && !m.read
     ).length;
+
     if (unread) {
       this.log('system', `${unread} unread message(s) waiting in the inbox.`);
+      this.send(
+        `[ON ARRIVAL] You have ${unread} unread message(s). Call ` +
+          `mcp__office__check_inbox now, deal with whatever it holds, and reply to ` +
+          `anyone who needs an answer. If nothing needs doing, say so in one line.`,
+        { from: 'office' }
+      );
     }
   }
 
@@ -518,6 +526,14 @@ export class AgentWorker {
           if (agent && this.sessionId) {
             // Now the conversation is real and safe to resume next time.
             agent.lastSessionId = this.sessionId;
+            agent.sessions ??= [];
+            if (!agent.sessions.some((s) => s.id === this.sessionId)) {
+              agent.sessions.push({
+                id: this.sessionId,
+                startedAt: Date.now(),
+                title: `Session ${agent.sessions.length + 1}`,
+              });
+            }
             store.save();
           }
 
@@ -794,22 +810,30 @@ setOwnershipTest(isOfficeSession);
  * Deliver a colleague's message into a live session, so staff who are on duty
  * actually notice each other rather than only finding mail later.
  */
-setMessageDeliverer(async (toAgentId, message) => {
+export async function deliverToAgent(toAgentId, message) {
   const worker = workers.get(toAgentId);
   if (!worker?.session) return false;
 
-  const from = store.agent(message.fromAgentId);
+  const fromLord = message.fromAgentId === 'lord';
+  const from = fromLord ? null : store.agent(message.fromAgentId);
+  const lord = store.state.office.lordName || 'Lord Marcos';
+
   worker.send(
-    `[INTERNAL MAIL] From ${from ? `${from.name} (${from.title})` : 'a colleague'} — ` +
-      `Subject: ${message.subject}\n\n${message.body}\n\n` +
-      `Handle this as your post requires. If it needs no action, say so briefly.`,
-    { from: 'agent' }
+    fromLord
+      ? `[FROM ${lord.toUpperCase()}] Subject: ${message.subject}\n\n${message.body}`
+      : `[INTERNAL MAIL] From ${from ? `${from.name} (${from.title})` : 'a colleague'} — ` +
+          `Subject: ${message.subject}\n\n${message.body}\n\n` +
+          `Handle this as your post requires. If it needs no action, say so briefly.`,
+    { from: fromLord ? 'lord' : 'agent' }
   );
+
   // It has been put in front of them; no need for them to find it again.
   message.read = true;
   store.save();
   return true;
-});
+}
+
+setMessageDeliverer(deliverToAgent);
 
 /**
  * Ask the CEO to rule on a proposal. This runs as a short, isolated one-shot
