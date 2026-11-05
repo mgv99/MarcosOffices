@@ -1,0 +1,13 @@
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Local office state lives in ~/.marcosoffices, but never commit a stray copy.
+.marcosoffices/
+office.json
+*.jsonl
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
