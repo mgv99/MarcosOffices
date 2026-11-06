@@ -150,7 +150,9 @@ export class HierarchyTree {
 
   render() {
     if (!this.state) return;
-    const agents = this.state.agents;
+    // The chart is of the office as it stands. Staff who have been let go
+    // keep their record, but hold no post and no place in the chain.
+    const agents = this.state.agents.filter((a) => !a.firedAt);
     if (!agents.length) return;
 
     // Build the reporting graph. Anyone whose supervisor is missing, or who is

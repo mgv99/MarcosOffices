@@ -48,7 +48,8 @@ export function findFreeSeat(departmentId, { excludeAgentId = null, forHead = fa
   if (!dept) return null;
 
   const taken = new Set(
-    store.state.agents
+    store
+      .staff()
       .filter((a) => a.departmentId === departmentId && a.id !== excludeAgentId)
       .map((a) => a.seat)
   );
@@ -299,7 +300,7 @@ export function deleteDepartment(id) {
   const dept = store.department(id);
   if (!dept) return { ok: false, error: 'no such department' };
 
-  const staff = store.state.agents.filter((a) => a.departmentId === id);
+  const staff = store.staff().filter((a) => a.departmentId === id);
   if (staff.length) {
     return {
       ok: false,
@@ -600,6 +601,114 @@ export function seedOffice() {
   return { ok: true, created };
 }
 
+/**
+ * Let someone go.
+ *
+ * They keep their record — their mail, their memory, their ledger — but give
+ * up their desk and their place in the chain of command. Striking them from
+ * the roster outright used to turn every letter they ever sent into a message
+ * from "unknown"; this way the history still names them, and they can be
+ * taken back on later.
+ */
+export function fireAgent(id) {
+  const agent = store.agent(id);
+  if (!agent) return { ok: false, error: 'no such agent' };
+  if (agent.isCeo) {
+    return { ok: false, error: 'the CEO cannot be dismissed; appoint a successor first' };
+  }
+  if (agent.firedAt) return { ok: false, error: `${agent.name} is already out of work` };
+
+  // Send them home first, so no session is left running for someone who no
+  // longer holds a post.
+  try {
+    stopAgent?.(id);
+  } catch {
+    /* a stuck session must not block the dismissal */
+  }
+
+  // Remember the post they held, so taking them back can put them where they
+  // were rather than wherever happens to be free.
+  agent.formerDepartmentId = agent.departmentId;
+  agent.formerSeat = agent.seat;
+  agent.formerSupervisorId = agent.supervisorId;
+
+  agent.firedAt = Date.now();
+  agent.departmentId = null;
+  agent.seat = null;
+  agent.supervisorId = null;
+  // Nobody out of work should be woken by a standing order.
+  if (agent.loop) agent.loop.enabled = false;
+
+  // Anyone who reported to them now reports to the CEO.
+  for (const other of store.staff()) {
+    if (other.supervisorId === id) other.supervisorId = store.state.office.ceoAgentId;
+  }
+  // A department whose head has gone has a vacant post, not a ghost one.
+  for (const dept of store.state.departments) {
+    if (dept.headAgentId === id) dept.headAgentId = null;
+  }
+
+  store.save();
+  bus.emitEvent('agent.updated', agent);
+  bus.emitEvent('agent.fired', { id, name: agent.name });
+  return { ok: true, agent };
+}
+
+/**
+ * Take someone back on.
+ *
+ * Their old desk if it is still free and the room still stands, otherwise the
+ * first room with space.
+ */
+export function rehireAgent(id, { departmentId = null } = {}) {
+  const agent = store.agent(id);
+  if (!agent) return { ok: false, error: 'no such agent' };
+  if (!agent.firedAt) return { ok: false, error: `${agent.name} already holds a post` };
+
+  const wanted = [departmentId, agent.formerDepartmentId]
+    .map((d) => store.department(d))
+    .filter(Boolean);
+
+  let dept = null;
+  let seat = null;
+  for (const candidate of [...wanted, ...store.state.departments]) {
+    const free = findFreeSeat(candidate.id, { excludeAgentId: id });
+    if (free == null) continue;
+    dept = candidate;
+    seat = free;
+    break;
+  }
+
+  if (!dept) {
+    return {
+      ok: false,
+      error: 'every department is full. Add a desk or open a department first.',
+    };
+  }
+
+  agent.firedAt = null;
+  agent.departmentId = dept.id;
+  agent.seat = seat;
+  // They answer to whoever heads the room they have joined, or to the CEO if
+  // the post is vacant.
+  const head = dept.headAgentId && dept.headAgentId !== id ? dept.headAgentId : null;
+  agent.supervisorId = head || store.state.office.ceoAgentId || null;
+
+  delete agent.formerDepartmentId;
+  delete agent.formerSeat;
+  delete agent.formerSupervisorId;
+
+  store.save();
+  bus.emitEvent('agent.updated', agent);
+  bus.emitEvent('agent.rehired', { id, name: agent.name, departmentId: dept.id });
+  return { ok: true, agent, department: dept };
+}
+
+/**
+ * Strike someone from the record for good. Everything that named them — the
+ * mail they sent, the approvals they raised — is left pointing at nobody, so
+ * this is the end of the line, not a dismissal.
+ */
 export function deleteAgent(id) {
   const agent = store.agent(id);
   if (!agent) return { ok: false, error: 'no such agent' };
@@ -607,12 +716,10 @@ export function deleteAgent(id) {
     return { ok: false, error: 'the CEO cannot be dismissed; appoint a successor first' };
   }
 
-  // Send them home before striking them off, so no session is left running
-  // for someone the office no longer knows about.
   try {
     stopAgent?.(id);
   } catch {
-    /* a stuck session must not block the dismissal */
+    /* a stuck session must not block the removal */
   }
 
   store.state.agents = store.state.agents.filter((a) => a.id !== id);

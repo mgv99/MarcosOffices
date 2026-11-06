@@ -20,7 +20,7 @@ import {
   createAgent,
   createDepartment,
   updateAgent,
-  deleteAgent,
+  fireAgent,
 } from './operations.js';
 
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
@@ -41,7 +41,8 @@ const tokens = (n) => {
 
 function findAgent(ref) {
   if (!ref) return null;
-  const agents = store.state.agents;
+  // Staff still on the payroll; the unemployed hold no post to act on.
+  const agents = store.staff();
   return (
     agents.find((a) => a.id === ref) ||
     agents.find((a) => a.name === ref) ||
@@ -283,7 +284,7 @@ export function buildHqServer(
 
           const out = [];
           for (const p of projects) {
-            const staff = store.state.agents.filter((a) => a.projectId === p.id);
+            const staff = store.staff().filter((a) => a.projectId === p.id);
             const used = staff.reduce((n, a) => n + totalTokens(a.stats), 0);
 
             out.push(`## ${p.name}\n${p.directory}\n${p.description || ''}`);
@@ -664,23 +665,27 @@ export function buildHqServer(
                   : ''),
               risk:
                 going.length === 1
-                  ? 'Irreversible. Their memory and record go with them.'
-                  : `Irreversible. ${going.length} records and memories are destroyed, ` +
-                    `and every department is left empty of them.`,
+                  ? 'They lose their desk and their place in the chain of command. ' +
+                    'Their record and memory are kept, and Lord Marcos alone may take ' +
+                    'them back on or strike them off for good.'
+                  : `${going.length} lose their desks and their place in the chain of ` +
+                    `command. Their records are kept, and Lord Marcos alone may take ` +
+                    `them back on or strike them off for good.`,
               severity: 'grave',
             },
             () => {
               const gone = [];
               const refused = [];
               for (const a of going) {
-                const result = deleteAgent(a.id);
+                const result = fireAgent(a.id);
                 if (result.ok) gone.push(a.name);
                 else refused.push(`${a.name}: ${result.error}`);
               }
               return {
                 ok: true,
                 summary:
-                  `${gone.length} have left the office: ${gone.join(', ') || 'nobody'}.` +
+                  `${gone.length} have left the office: ${gone.join(', ') || 'nobody'}. ` +
+                  `They are out of work, not struck from the record.` +
                   (refused.length ? `\nCould not dismiss — ${refused.join('; ')}.` : ''),
               };
             }

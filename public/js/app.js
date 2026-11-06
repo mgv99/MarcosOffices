@@ -98,6 +98,10 @@ const state = {
   // Unsent order text, per agent. The panel re-renders whenever an agent's
   // status changes, which would otherwise throw away what you were typing.
   drafts: {},
+  // Whether the inbox and an agent's mail are showing the archive instead of
+  // the live correspondence.
+  showArchivedInbox: false,
+  showArchivedMail: false,
 };
 
 let map = null;
@@ -112,6 +116,21 @@ let view = 'office'; // 'office' | 'tree'
 let orderBoxResize = null;
 
 const agentById = (id) => state.snapshot?.agents.find((a) => a.id === id) || null;
+
+/**
+ * Everyone on the payroll.
+ *
+ * Someone who has been let go stays in the record — so the mail they sent
+ * still carries their name — but holds no desk, heads no department, and
+ * takes no orders. Every view of the office proper reads this.
+ */
+const activeAgents = () => state.snapshot?.agents.filter((a) => !a.firedAt) || [];
+
+/** Everyone out of work, newest departure first. */
+const unemployedAgents = () =>
+  (state.snapshot?.agents || [])
+    .filter((a) => a.firedAt)
+    .sort((a, b) => (b.firedAt || 0) - (a.firedAt || 0));
 const deptById = (id) => state.snapshot?.departments.find((d) => d.id === id) || null;
 const statusOf = (id) => state.snapshot?.workers?.[id]?.status || 'offline';
 
@@ -121,16 +140,22 @@ const pendingApprovals = () =>
 const unreadNotifications = () =>
   (state.snapshot?.notifications || []).filter((n) => !n.read);
 
-/** Everything the staff have addressed to Lord Marcos. */
+/** Everything the staff have addressed to Lord Marcos, archive aside. */
 const lordInbox = () =>
-  (state.snapshot?.messages || []).filter((m) => m.toAgentId === 'lord');
+  (state.snapshot?.messages || []).filter((m) => m.toAgentId === 'lord' && !m.archived);
+
+/** What has been filed away out of the inbox. */
+const lordArchive = () =>
+  (state.snapshot?.messages || []).filter((m) => m.toAgentId === 'lord' && m.archived);
 
 const unreadInbox = () => lordInbox().filter((m) => !m.read);
 
 /** Resolve a message sender for display: agents, or the Lord himself. */
 function senderName(id) {
   if (id === 'lord') return state.snapshot?.office?.lordName || 'Lord Marcos';
-  return agentById(id)?.name || 'unknown';
+  const agent = agentById(id);
+  if (!agent) return 'a departed member of staff';
+  return agent.firedAt ? `${agent.name} (out of work)` : agent.name;
 }
 
 // --- boot -------------------------------------------------------------------
@@ -439,6 +464,17 @@ async function handleEvent({ type, data }) {
       break;
     }
 
+    // Archiving is only ever Lord Marcos's own filing, but it may have been
+    // done from another window.
+    case 'message.archived': {
+      for (const m of state.snapshot?.messages || []) {
+        if (data.ids?.includes(m.id)) m.archived = data.archived;
+      }
+      renderBadges();
+      if (state.panel === 'inbox' || state.panel === 'agent') renderPanel();
+      break;
+    }
+
     case 'message.new': {
       state.snapshot?.messages.unshift(data);
       renderBadges();
@@ -458,6 +494,8 @@ async function handleEvent({ type, data }) {
     // Anything structural: take a fresh snapshot rather than patching by hand.
     case 'agent.created':
     case 'agent.deleted':
+    case 'agent.fired':
+    case 'agent.rehired':
     case 'agent.updated':
     case 'department.created':
     case 'department.updated':
@@ -505,7 +543,9 @@ function closePanel() {
 
 async function openAgent(id) {
   state.selectedAgentId = id;
-  state.agentTab = 'orders';
+  // Someone out of work takes no orders; open on the record instead.
+  state.agentTab = agentById(id)?.firedAt ? 'mail' : 'orders';
+  state.showArchivedMail = false;
   map.select(id);
   tree?.select(id);
   openPanel('agent');
@@ -592,8 +632,9 @@ function renderAgentPanel() {
   const body = h('div.panel-content');
   const nav = tabs(
     [
-      ['orders', 'Orders'],
-      ['activity', 'Activity'],
+      // Someone out of work holds no post and takes no orders, but their
+      // record stays open to be read.
+      ...(agent.firedAt ? [] : [['orders', 'Orders'], ['activity', 'Activity']]),
       ['mail', 'Mail'],
       ['config', 'Configuration'],
       ['memory', 'Memory'],
@@ -605,7 +646,33 @@ function renderAgentPanel() {
     }
   );
 
-  setPanel(heading, [header, nav, body]);
+  // A tab that no longer exists would render nothing at all.
+  if (agent.firedAt && ['orders', 'activity'].includes(state.agentTab)) {
+    state.agentTab = 'mail';
+  }
+
+  const notice = agent.firedAt
+    ? h('div.card', { style: { borderColor: 'var(--gold)' } }, [
+        h('div.card-title', { text: 'Out of work' }),
+        h('div.card-sub', {
+          text:
+            `Let go ${timeOf(agent.firedAt)}. Their record is kept in full, so ` +
+            `everything they ever wrote still carries their name. Take them back on ` +
+            `from the Staff panel, or from the foot of their configuration.`,
+        }),
+        h('div.actions', {}, [
+          h('button.btn.btn-primary.btn-sm', {
+            text: '↩ Take back on',
+            onclick: async () => {
+              await guard(() => api.rehireAgent(agent.id), `${agent.name} is back at a desk.`);
+              map.fit();
+            },
+          }),
+        ]),
+      ])
+    : null;
+
+  setPanel(heading, [header, nav, notice, body]);
   // The Orders tab manages its own scrolling so the order box can sit at the
   // bottom; every other tab scrolls as a normal document.
   $('#side-body').dataset.layout = state.agentTab === 'orders' ? 'console' : 'scroll';
@@ -629,18 +696,30 @@ function buildAgentSubhead(agent) {
   const dept = deptById(agent.departmentId);
   const supervisor = agent.supervisorId ? agentById(agent.supervisorId) : null;
   const stats = agent.stats || {};
+  // Someone out of work can be read but not commanded, so the controls that
+  // would put them to work are left off.
+  const idle = !!agent.firedAt;
 
   return h('div.agent-subhead', {}, [
     h('span.agent-facts', {
       text:
-        `${dept?.name || 'unassigned'} · ${tokens(totalTokens(stats))} tokens over ` +
+        `${idle ? 'out of work' : dept?.name || 'unassigned'} · ` +
+        `${tokens(totalTokens(stats))} tokens over ` +
         `${stats.tasks || 0} task(s)` +
         `${stats.errors ? ` · ${stats.errors} failure(s)` : ''}` +
         `${supervisor ? ` · reports to ${supervisor.name}` : ''}`,
     }),
 
     h('span.agent-controls', {}, [
-      status === 'offline' || status === 'error'
+      idle
+        ? h('button.btn.btn-primary.btn-sm', {
+            text: '↩ Take back on',
+            onclick: async () => {
+              await guard(() => api.rehireAgent(agent.id), `${agent.name} is back at a desk.`);
+              map.fit();
+            },
+          })
+        : status === 'offline' || status === 'error'
         ? h('button.btn.btn-primary.btn-sm', {
             text: '▶ Call to duty',
             onclick: () => guard(() => api.hire(agent.id), 'Reporting for duty…'),
@@ -649,12 +728,12 @@ function buildAgentSubhead(agent) {
             text: '■ Send home',
             onclick: () => guard(() => api.dismiss(agent.id), 'Sent home.'),
           }),
-      status === 'working' &&
+      !idle && status === 'working' &&
         h('button.btn.btn-sm', {
           text: '⏸ Interrupt',
           onclick: () => guard(() => api.interrupt(agent.id), 'Work interrupted.'),
         }),
-      h('button.btn.btn-sm', {
+      !idle && h('button.btn.btn-sm', {
         text: '✦ New session',
         title: 'Leave this conversation behind and start a fresh one',
         onclick: async () => {
@@ -670,18 +749,20 @@ function buildAgentSubhead(agent) {
           await guard(() => api.switchSession(agent.id, null), 'A fresh conversation.');
         },
       }),
-      h('button.btn.btn-sm', { text: '⌖ Find', onclick: () => map.focusAgent(agent.id) }),
-      h('button.btn.btn-sm', {
+      !idle && h('button.btn.btn-sm', { text: '⌖ Find', onclick: () => map.focusAgent(agent.id) }),
+      !idle && h('button.btn.btn-sm', {
         text: '⧉ Pop out',
         title: 'Open a floating console, so you can watch several agents at once',
         onclick: () => openAgentWindow(agent.id),
       }),
     ]),
 
-    h('span.pill.pill-status', {
-      text: status,
-      style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
-    }),
+    idle
+      ? h('span.pill', { text: 'out of work' })
+      : h('span.pill.pill-status', {
+          text: status,
+          style: { color: STATUS_COLORS[status], borderColor: STATUS_COLORS[status] },
+        }),
   ]);
 }
 
@@ -1482,7 +1563,7 @@ function renderAgentConfig(container, agent) {
         'Supervisor',
         select(
           'supervisorId',
-          [['', '— none (answers to you) —'], ...snapshot.agents.filter((a) => a.id !== agent.id).map((a) => [a.id, `${a.name} (${a.title})`])],
+          [['', '— none (answers to you) —'], ...activeAgents().filter((a) => a.id !== agent.id).map((a) => [a.id, `${a.name} (${a.title})`])],
           agent.supervisorId || ''
         )
       ),
@@ -1593,20 +1674,45 @@ function renderAgentConfig(container, agent) {
         },
       }),
       h('span.spacer'),
-      !agent.isCeo &&
-        h('button.btn.btn-danger.btn-sm', {
-          text: 'Dismiss from service',
-          onclick: async () => {
-            if (!confirm(`Dismiss ${agent.name} from the office permanently?`)) return;
-            await guard(() => api.deleteAgent(agent.id), `${agent.name} has been dismissed.`);
-            closePanel();
-          },
-        }),
+      !agent.isCeo && agent.firedAt
+        ? h('button.btn.btn-primary.btn-sm', {
+            text: '↩ Take back on',
+            onclick: async () => {
+              await guard(() => api.rehireAgent(agent.id), `${agent.name} is back at a desk.`);
+              map.fit();
+            },
+          })
+        : null,
+      !agent.isCeo && !agent.firedAt
+        ? h('button.btn.btn-danger.btn-sm', {
+            text: 'Dismiss from service',
+            onclick: async () => {
+              if (
+                !confirm(
+                  `Let ${agent.name} go? They give up their desk, but their record, ` +
+                    `their mail and their memory are kept — you will find them under ` +
+                    `Unemployment in the Staff panel, and may take them back on.`
+                )
+              )
+                return;
+              await guard(
+                () => api.deleteAgent(agent.id),
+                `${agent.name} has been let go, and waits in the unemployment office.`
+              );
+              closePanel();
+            },
+          })
+        : null,
     ])
   );
 }
 
-/** Everything this agent has sent and received. */
+/**
+ * Everything this agent has sent and received.
+ *
+ * Archiving here files a letter out of *your* view of their mail. The agent
+ * still has it: their own inbox is untouched, and they are never told.
+ */
 async function renderAgentMail(container, agent) {
   container.replaceChildren(h('div.empty', { text: 'Opening their mail…' }));
 
@@ -1617,8 +1723,28 @@ async function renderAgentMail(container, agent) {
     return container.replaceChildren(h('div.empty', { text: err.message }));
   }
 
-  const received = mail.filter((m) => m.toAgentId === agent.id);
-  const sent = mail.filter((m) => m.fromAgentId === agent.id);
+  const archived = state.showArchivedMail;
+  const visible = mail.filter((m) => !!m.archived === archived);
+  const filedAway = mail.filter((m) => m.archived).length;
+
+  const received = visible.filter((m) => m.toAgentId === agent.id);
+  const sent = visible.filter((m) => m.fromAgentId === agent.id);
+
+  // The mail is fetched rather than held in the snapshot, so a change here
+  // has to re-run this tab rather than just re-rendering the panel.
+  const file = async (ids, next) => {
+    if (!ids.length) return;
+    try {
+      await api.archiveMessages(ids, next);
+      for (const m of state.snapshot?.messages || []) {
+        if (ids.includes(m.id)) m.archived = next;
+      }
+      renderBadges();
+      renderAgentMail(container, agent);
+    } catch (err) {
+      toast({ title: 'Could not file that away', body: err.message, kind: 'error' });
+    }
+  };
 
   const card = (m, incoming) =>
     h('div.card', { style: { opacity: incoming && !m.read ? '1' : '.8' } }, [
@@ -1632,24 +1758,67 @@ async function renderAgentMail(container, agent) {
           }),
         ]),
         incoming && !m.read && h('span.pill', { text: 'UNREAD', style: { color: 'var(--gold)' } }),
+        h('button.btn.btn-sm', {
+          text: m.archived ? '↩' : '🗄',
+          title: m.archived ? 'Take it back out of the archive' : 'Archive (your view only)',
+          onclick: () => file([m.id], !m.archived),
+        }),
       ]),
       markdownNode(String(m.body || '').slice(0, 4000)),
     ]);
 
-  container.replaceChildren(
+  /** A section heading with its own sweep-it-all button. */
+  const heading = (label, list) =>
+    h('div.card-head', { style: { margin: '14px 0 8px' } }, [
+      h('h4', {
+        text: `${label} (${list.length})`,
+        style: { margin: '0', flex: '1', color: 'var(--gold)' },
+      }),
+      list.length
+        ? h('button.btn.btn-sm', {
+            text: archived ? '↩ Unarchive all' : '🗄 Archive all',
+            onclick: () => file(list.map((m) => m.id), !archived),
+          })
+        : null,
+    ]);
+
+  // replaceChildren stringifies whatever it is handed, so a `cond ? node : null`
+  // would print "null" into the panel. Drop the empties first.
+  const children = [
     h('div.actions', { style: { marginBottom: '10px' } }, [
       h('button.btn.btn-gold.btn-sm', {
         text: '✎ Write to them',
         onclick: () => openComposeForm({ toAgentId: agent.id }),
       }),
+      h('button.btn.btn-sm', {
+        text: archived ? '← Back to their mail' : `🗄 Archive (${filedAway})`,
+        onclick: () => {
+          state.showArchivedMail = !archived;
+          renderAgentMail(container, agent);
+        },
+      }),
     ]),
 
-    h('h4', { text: `Received (${received.length})`, style: { margin: '6px 0 8px', color: 'var(--gold)' } }),
-    ...(received.length ? received.map((m) => card(m, true)) : [h('div.empty', { text: 'Nothing received.' })]),
+    archived
+      ? h('div.hint', {
+          text:
+            `What you have filed out of ${agent.name}'s mail. They still have every ` +
+            `one of these — archiving hides a letter from you, not from them.`,
+        })
+      : null,
 
-    h('h4', { text: `Sent (${sent.length})`, style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
-    ...(sent.length ? sent.map((m) => card(m, false)) : [h('div.empty', { text: 'Nothing sent.' })])
-  );
+    heading('Received', received),
+    ...(received.length
+      ? received.map((m) => card(m, true))
+      : [h('div.empty', { text: archived ? 'Nothing archived.' : 'Nothing received.' })]),
+
+    heading('Sent', sent),
+    ...(sent.length
+      ? sent.map((m) => card(m, false))
+      : [h('div.empty', { text: archived ? 'Nothing archived.' : 'Nothing sent.' })]),
+  ];
+
+  container.replaceChildren(...children.filter((n) => n != null && n !== false));
 }
 
 /** Their memory, one file per topic. */
@@ -1883,35 +2052,88 @@ function renderSanctionsPanel() {
  */
 function renderInboxPanel() {
   const inbox = lordInbox();
+  const archive = lordArchive();
+  const showing = state.showArchivedInbox ? archive : inbox;
   const lord = state.snapshot.office.lordName || 'Lord Marcos';
 
   setPanel('MY INBOX', [
     h('div.card', {}, [
-      h('div.card-title', { text: `${inbox.length} message(s) to you` }),
+      h('div.card-title', {
+        text: state.showArchivedInbox
+          ? `${archive.length} archived message(s)`
+          : `${inbox.length} message(s) to you`,
+      }),
       h('div.card-sub', {
-        text:
-          'What the CEO, the heads of department and anyone else has written to you ' +
-          'directly — reports, petitions and findings. Reply to the sender, or pass ' +
-          'it to someone else.',
+        text: state.showArchivedInbox
+          ? 'Messages you have filed away. They are still in the record, and the ' +
+            'staff who wrote them are none the wiser.'
+          : 'What the CEO, the heads of department and anyone else has written to you ' +
+            'directly — reports, petitions and findings. Reply to the sender, pass ' +
+            'it to someone else, or file it away.',
       }),
       h('div.actions', {}, [
         h('button.btn.btn-gold.btn-sm', {
           text: '✎ Write to someone',
           onclick: () => openComposeForm(),
         }),
-        unreadInbox().length
+        h('button.btn.btn-sm', {
+          text: state.showArchivedInbox
+            ? '← Back to the inbox'
+            : `🗄 Archive (${archive.length})`,
+          onclick: () => {
+            state.showArchivedInbox = !state.showArchivedInbox;
+            renderPanel();
+          },
+        }),
+        !state.showArchivedInbox && unreadInbox().length
           ? h('button.btn.btn-sm', {
               text: 'Mark all read',
               onclick: () => guard(() => api.readInbox(), 'Inbox cleared.', true),
             })
           : null,
+        showing.length
+          ? h('button.btn.btn-sm', {
+              text: state.showArchivedInbox ? '↩ Unarchive all' : '🗄 Archive all',
+              onclick: () =>
+                archiveMessages(
+                  showing.map((m) => m.id),
+                  !state.showArchivedInbox
+                ),
+            })
+          : null,
       ]),
     ]),
 
-    ...(inbox.length
-      ? inbox.map((m) => inboxCard(m))
-      : [h('div.empty', { text: `Nobody has written to ${lord} yet.` })]),
+    ...(showing.length
+      ? showing.map((m) => inboxCard(m))
+      : [
+          h('div.empty', {
+            text: state.showArchivedInbox
+              ? 'Nothing has been archived.'
+              : `Nobody has written to ${lord} yet.`,
+          }),
+        ]),
   ]);
+}
+
+/**
+ * File messages away, or take them back out.
+ *
+ * Archiving is Lord Marcos's own filing and nothing more: the message stays
+ * in the record and the agent who sent it still has it in their own mail.
+ */
+async function archiveMessages(ids, archived = true) {
+  if (!ids.length) return;
+  try {
+    await api.archiveMessages(ids, archived);
+    for (const m of state.snapshot?.messages || []) {
+      if (ids.includes(m.id)) m.archived = archived;
+    }
+    renderBadges();
+    renderPanel();
+  } catch (err) {
+    toast({ title: 'Could not file that away', body: err.message, kind: 'error' });
+  }
 }
 
 function inboxCard(message) {
@@ -1925,6 +2147,7 @@ function inboxCard(message) {
       ]),
       !message.read && h('span.pill', { text: 'NEW', style: { color: 'var(--gold)' } }),
       from &&
+        !from.firedAt &&
         h('button.btn.btn-sm', {
           text: '→ Open chat',
           onclick: () => {
@@ -1943,6 +2166,10 @@ function inboxCard(message) {
         text: '➥ Pass on',
         onclick: () => openComposeForm({ subject: `Fwd: ${message.subject}`, quote: message.body }),
       }),
+      h('button.btn.btn-sm', {
+        text: message.archived ? '↩ Unarchive' : '🗄 Archive',
+        onclick: () => archiveMessages([message.id], !message.archived),
+      }),
     ]),
   ]);
 }
@@ -1954,7 +2181,7 @@ function openComposeForm({ toAgentId = '', subject = '', quote = '' } = {}) {
     {},
     [
       h('option', { value: '' }, ['— choose a recipient —']),
-      ...state.snapshot.agents.map((a) =>
+      ...activeAgents().map((a) =>
         h('option', { value: a.id, selected: a.id === toAgentId ? true : null }, [
           `${a.name} (${a.title})`,
         ])
@@ -2007,14 +2234,14 @@ function openComposeForm({ toAgentId = '', subject = '', quote = '' } = {}) {
  */
 function renderDispatchesPanel() {
   const notifications = state.snapshot.notifications || [];
-  const working = state.snapshot.agents.filter((a) => statusOf(a.id) === 'working');
+  const working = activeAgents().filter((a) => statusOf(a.id) === 'working');
 
   setPanel('DISPATCHES', [
     h('div.card', {}, [
       h('div.card-title', { text: 'The office at a glance' }),
       h('div.card-sub', {
         text:
-          `${state.snapshot.agents.length} staff · ${working.length} at work · ` +
+          `${activeAgents().length} staff · ${working.length} at work · ` +
           `${pendingApprovals().length} awaiting sanction · ` +
           `${state.snapshot.visitors.length} visiting session(s)`,
       }),
@@ -2294,7 +2521,7 @@ function approvalCard(approval, { compact = false } = {}) {
 // --- staff, departments, projects, components, settings ---------------------
 
 function renderStaffPanel() {
-  const rows = state.snapshot.agents.map((agent) => {
+  const rows = activeAgents().map((agent) => {
     const status = statusOf(agent.id);
     const dept = deptById(agent.departmentId);
     return h('div.card', {}, [
@@ -2331,9 +2558,11 @@ function renderStaffPanel() {
     ]);
   });
 
+  const out = unemployedAgents();
+
   setPanel('STAFF', [
     // A one-CEO office is not much of an office; offer to staff it.
-    state.snapshot.agents.length < 3 &&
+    activeAgents().length < 3 &&
       h('div.card', {}, [
         h('div.card-title', { text: 'This office is nearly empty' }),
         h('div.card-sub', {
@@ -2358,7 +2587,7 @@ function renderStaffPanel() {
       h('button.btn.btn-sm', {
         text: 'Call everyone to duty',
         onclick: async () => {
-          for (const agent of state.snapshot.agents) {
+          for (const agent of activeAgents()) {
             if (statusOf(agent.id) === 'offline') await api.hire(agent.id).catch(() => {});
           }
           toast({ title: 'The office is at work', kind: 'done' });
@@ -2366,6 +2595,22 @@ function renderStaffPanel() {
       }),
     ]),
     ...rows,
+
+    // Everyone let go. They hold no desk, but their record — their mail,
+    // their memory, their ledger — is kept, so the history still names them.
+    out.length &&
+      h('h4', {
+        text: `Unemployment (${out.length})`,
+        style: { margin: '20px 0 4px', color: 'var(--gold)' },
+      }),
+    out.length &&
+      h('div.hint', {
+        text:
+          'Let go, but not struck from the record — everything they ever wrote still ' +
+          'carries their name. Take one back on, or remove them for good.',
+      }),
+    ...out.map((agent) => unemployedCard(agent)),
+
     state.snapshot.visitors.length &&
       h('h4', { text: 'Visiting sessions', style: { margin: '18px 0 8px', color: 'var(--gold)' } }),
     ...state.snapshot.visitors.map((v) =>
@@ -2378,17 +2623,70 @@ function renderStaffPanel() {
   ]);
 }
 
+/** Someone out of work: their record, and the two things you may do with it. */
+function unemployedCard(agent) {
+  const since = agent.firedAt ? timeOf(agent.firedAt) : 'some time ago';
+  const former = deptById(agent.formerDepartmentId);
+
+  return h('div.card', { style: { opacity: '.8' } }, [
+    h('div.card-head', {}, [
+      portrait(agent),
+      h('div', { style: { flex: '1', minWidth: '0' } }, [
+        h('div.card-title', { text: agent.name }),
+        h('div.card-sub', {
+          text: `${agent.title}${former ? ` · formerly ${former.name}` : ''}`,
+        }),
+        h('div.card-sub', {
+          text:
+            `let go ${since} · ${tokens(totalTokens(agent.stats))} tokens · ` +
+            `${agent.stats?.tasks || 0} task(s)`,
+        }),
+      ]),
+      h('span.pill', { text: 'out of work' }),
+    ]),
+    h('div.actions', {}, [
+      h('button.btn.btn-sm', {
+        text: 'Open record',
+        onclick: () => openAgent(agent.id),
+      }),
+      h('button.btn.btn-primary.btn-sm', {
+        text: '↩ Take back on',
+        onclick: async () => {
+          await guard(
+            () => api.rehireAgent(agent.id),
+            `${agent.name} is back at a desk.`
+          );
+          map.fit();
+        },
+      }),
+      h('button.btn.btn-danger.btn-sm', {
+        text: 'Remove for good',
+        onclick: async () => {
+          if (
+            !confirm(
+              `Strike ${agent.name} from the record for good? Every message they ` +
+                `sent will be left with no name on it. This cannot be undone.`
+            )
+          )
+            return;
+          await guard(() => api.purgeAgent(agent.id), `${agent.name} is gone.`);
+        },
+      }),
+    ]),
+  ]);
+}
+
 function openHireForm() {
   const snapshot = state.snapshot;
   const form = {};
   const name = (form.name = h('input', { type: 'text', placeholder: 'Cassia' }));
   const title = (form.title = h('input', { type: 'text', placeholder: 'Senior Engineer' }));
   const dept = (form.departmentId = h('select', {}, snapshot.departments.map((d) =>
-    h('option', { value: d.id }, [`${d.name} (${snapshot.agents.filter((a) => a.departmentId === d.id).length}/${d.seats} seats)`])
+    h('option', { value: d.id }, [`${d.name} (${activeAgents().filter((a) => a.departmentId === d.id).length}/${d.seats} seats)`])
   )));
   const supervisor = (form.supervisorId = h('select', {}, [
     h('option', { value: '' }, ['— the CEO —']),
-    ...snapshot.agents.map((a) => h('option', { value: a.id }, [`${a.name} (${a.title})`])),
+    ...activeAgents().map((a) => h('option', { value: a.id }, [`${a.name} (${a.title})`])),
   ]));
   const model = (form.model = h('select', {}, [
     h('option', { value: 'sonnet' }, ['Sonnet — the workhorse']),
@@ -2437,7 +2735,7 @@ function openHireForm() {
 
 function renderDepartmentsPanel() {
   const cards = state.snapshot.departments.map((dept) => {
-    const staff = state.snapshot.agents.filter((a) => a.departmentId === dept.id);
+    const staff = activeAgents().filter((a) => a.departmentId === dept.id);
     const seats = h('input', { type: 'number', value: dept.seats, min: String(Math.max(1, staff.length)), max: '24' });
     const name = h('input', { type: 'text', value: dept.name });
     const context = h('textarea', { rows: 3, text: dept.context || '' });
@@ -2551,7 +2849,7 @@ function openDepartmentForm() {
 
 function renderProjectsPanel() {
   const cards = state.snapshot.projects.map((project) => {
-    const staff = state.snapshot.agents.filter((a) => a.projectId === project.id);
+    const staff = activeAgents().filter((a) => a.projectId === project.id);
 
     // Group the posted staff by the department they serve in, so a project
     // reads as "who, from where" rather than a flat list of names.
@@ -2890,7 +3188,7 @@ function renderSettingsPanel() {
   const lordName = h('input', { type: 'text', value: office.lordName });
   const motto = h('input', { type: 'text', value: office.motto || '' });
   const charter = h('textarea', { rows: 6, text: office.charter || '' });
-  const ceo = h('select', {}, state.snapshot.agents.map((a) =>
+  const ceo = h('select', {}, activeAgents().map((a) =>
     h('option', { value: a.id, selected: a.id === office.ceoAgentId ? true : null }, [`${a.name} (${a.title})`])
   ));
 

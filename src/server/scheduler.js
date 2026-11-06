@@ -15,7 +15,7 @@ let timer = null;
 async function tick() {
   const now = Date.now();
 
-  for (const agent of store.state.agents) {
+  for (const agent of store.staff()) {
     const loop = agent.loop;
     if (!loop?.enabled || !loop.prompt?.trim()) continue;
 

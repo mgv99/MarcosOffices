@@ -29,6 +29,9 @@ export const api = {
 
   inbox: () => request('GET', '/api/inbox'),
   readInbox: (ids) => request('POST', '/api/inbox/read', { ids }),
+  /** File messages away (or take them back out) — Lord Marcos's view only. */
+  archiveMessages: (ids, archived = true) =>
+    request('POST', '/api/messages/archive', { ids, archived }),
   sanctionAll: (note) => request('POST', '/api/approvals/sanction-all', { note }),
 
   createDepartment: (body) => request('POST', '/api/departments', body),
@@ -39,7 +42,12 @@ export const api = {
 
   createAgent: (body) => request('POST', '/api/agents', body),
   updateAgent: (id, patch) => request('PATCH', `/api/agents/${id}`, patch),
+  /** Let someone go: they move to the unemployment list, record intact. */
   deleteAgent: (id) => request('DELETE', `/api/agents/${id}`),
+  /** Strike someone from the record for good. */
+  purgeAgent: (id) => request('DELETE', `/api/agents/${id}/permanent`),
+  rehireAgent: (id, departmentId = null) =>
+    request('POST', `/api/agents/${id}/rehire`, { departmentId }),
   hire: (id) => request('POST', `/api/agents/${id}/hire`),
   dismiss: (id) => request('POST', `/api/agents/${id}/dismiss`),
   order: (id, text) => request('POST', `/api/agents/${id}/order`, { text }),

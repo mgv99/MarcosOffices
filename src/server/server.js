@@ -45,6 +45,8 @@ import {
   createAgent,
   updateAgent,
   deleteAgent,
+  fireAgent,
+  rehireAgent,
   createDepartment,
   deleteDepartment,
   setDepartmentHead,
@@ -142,7 +144,8 @@ async function snapshot() {
     components: { skills, mcpServers, registry: store.state.components },
     approvals: store.state.approvals.slice(0, 100),
     notifications: store.state.notifications.slice(0, 100),
-    messages: store.state.messages.slice(0, 100),
+    // Generous, because the browser files archived mail out of this same list.
+    messages: store.state.messages.slice(0, 400),
     workers: allWorkerStates(),
     visitors,
     auth,
@@ -213,6 +216,30 @@ route('GET', /^\/api\/inbox$/, async (req, res) => {
     messages: store.state.messages.filter((m) => m.toAgentId === 'lord').slice(0, 200),
     sent: store.state.messages.filter((m) => m.fromAgentId === 'lord').slice(0, 100),
   });
+});
+
+/**
+ * File messages away, or take them back out.
+ *
+ * Archiving is Lord Marcos's own filing: it hides a message from his inbox
+ * and from the mail he reads over an agent's shoulder, and changes nothing
+ * for the agent who sent or received it.
+ */
+route('POST', /^\/api\/messages\/archive$/, async (req, res) => {
+  const { ids, archived = true } = await readBody(req);
+  if (!Array.isArray(ids) || !ids.length) return fail(res, 400, 'no messages given');
+
+  const target = new Set(ids);
+  const changed = [];
+  for (const m of store.state.messages) {
+    if (!target.has(m.id)) continue;
+    m.archived = !!archived;
+    changed.push(m.id);
+  }
+
+  store.save();
+  bus.emitEvent('message.archived', { ids: changed, archived: !!archived });
+  ok(res, { changed: changed.length });
 });
 
 /** Mark messages in Lord Marcos's inbox as read. */
@@ -309,15 +336,39 @@ route('PATCH', /^\/api\/agents\/([\w]+)$/, async (req, res, [id]) => {
   });
 });
 
+/**
+ * Let someone go. They keep their record and move to the unemployment list,
+ * so everything they ever wrote still carries their name.
+ */
 route('DELETE', /^\/api\/agents\/([\w]+)$/, async (req, res, [id]) => {
+  await dismiss(id);
+  const result = fireAgent(id);
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, result.agent);
+});
+
+/** Strike someone from the record for good. There is no coming back. */
+route('DELETE', /^\/api\/agents\/([\w]+)\/permanent$/, async (req, res, [id]) => {
   await dismiss(id);
   const result = deleteAgent(id);
   if (!result.ok) return fail(res, 400, result.error);
   ok(res);
 });
 
+/** Take someone back on, at their old desk if it is still free. */
+route('POST', /^\/api\/agents\/([\w]+)\/rehire$/, async (req, res, [id]) => {
+  const { departmentId = null } = await readBody(req);
+  const result = rehireAgent(id, { departmentId });
+  if (!result.ok) return fail(res, 400, result.error);
+  ok(res, { agent: result.agent, department: result.department });
+});
+
 route('POST', /^\/api\/agents\/([\w]+)\/hire$/, async (req, res, [id]) => {
-  if (!store.agent(id)) return fail(res, 404, 'no such agent');
+  const agent = store.agent(id);
+  if (!agent) return fail(res, 404, 'no such agent');
+  if (agent.firedAt) {
+    return fail(res, 400, `${agent.name} is out of work. Take them back on first.`);
+  }
   try {
     ok(res, await hireOn(id));
   } catch (err) {
@@ -331,7 +382,11 @@ route('POST', /^\/api\/agents\/([\w]+)\/dismiss$/, async (req, res, [id]) => {
 });
 
 route('POST', /^\/api\/agents\/([\w]+)\/order$/, async (req, res, [id]) => {
-  if (!store.agent(id)) return fail(res, 404, 'no such agent');
+  const target = store.agent(id);
+  if (!target) return fail(res, 404, 'no such agent');
+  if (target.firedAt) {
+    return fail(res, 400, `${target.name} is out of work and takes no orders.`);
+  }
   const { text } = await readBody(req);
   if (!text?.trim()) return fail(res, 400, 'an order needs words');
   try {

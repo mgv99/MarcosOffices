@@ -117,6 +117,7 @@ function defaultState() {
         // The CEO may inspect and reshape the office itself.
         canManageOffice: true,
         stats: emptyStats(),
+        firedAt: null,
         createdAt: Date.now(),
         lastSessionId: null,
       },
@@ -204,11 +205,16 @@ class Store {
     s.notifications ??= [];
     s.messages ??= [];
 
+    // Archiving only ever hides a message from Lord Marcos's own views; the
+    // staff keep every letter they were sent.
+    for (const m of s.messages) m.archived ??= false;
+
     // Staff dismissed before departures were tidied up can leave references
     // behind: a department headed by someone who has gone, or an agent
     // reporting to one. Clear them, or the office describes a hierarchy that
-    // does not exist.
-    const present = new Set(s.agents.map((a) => a.id));
+    // does not exist. Someone merely out of work is still present, so only
+    // the truly departed are swept up here.
+    const present = new Set(s.agents.filter((a) => !a.firedAt).map((a) => a.id));
     for (const d of s.departments) {
       if (d.headAgentId && !present.has(d.headAgentId)) d.headAgentId = null;
     }
@@ -231,6 +237,9 @@ class Store {
     }
 
     for (const a of s.agents) {
+      // When they were let go, if they were. Someone out of work keeps their
+      // record, their mail and their memory — they simply hold no post.
+      a.firedAt ??= null;
       a.allowedTools ??= [];
       a.disallowedTools ??= [];
       a.enabledSkills ??= [];
@@ -312,9 +321,25 @@ class Store {
     return this.agent(this.state.office.ceoAgentId);
   }
 
+  /**
+   * Everyone currently on the payroll. Agents who have been let go stay in
+   * the record so their mail and their history still name them, but they
+   * hold no post and take no part in the running of the office.
+   */
+  staff() {
+    return this.state.agents.filter((a) => !a.firedAt);
+  }
+
+  /** Agents out of work, newest departure first. */
+  unemployed() {
+    return this.state.agents
+      .filter((a) => a.firedAt)
+      .sort((a, b) => (b.firedAt || 0) - (a.firedAt || 0));
+  }
+
   /** Agents that report directly to `id`. */
   reportsOf(id) {
-    return this.state.agents.filter((a) => a.supervisorId === id);
+    return this.staff().filter((a) => a.supervisorId === id);
   }
 
   /** Walk up the supervisor chain, nearest supervisor first. */

@@ -71,7 +71,11 @@ staff looks like themselves permanently.
 - **Sanctions** — everything waiting on your word, with **Sanction all** for the
   routine ones. Questions are never swept up by it: they need a real answer.
 - **Inbox** — what the staff have written to *you*. Reports, petitions, findings.
-  Reply to the sender, or pass it on to someone else.
+  Reply to the sender, pass it on to someone else, or **Archive** it. **Archive all**
+  clears the lot in one stroke, and **Archive (n)** switches to what you have filed
+  away, where anything can be taken back out. Archiving is your own filing and
+  nothing more: the message stays in the record, the agent keeps their copy, and
+  they are never told.
 - **Dispatches** — the office's event log: tasks that finished, shifts that ran on
   their own, agents that failed. Things that happened while you were looking
   elsewhere. Click one to go to the agent it concerns.
@@ -88,7 +92,10 @@ Each agent has five tabs, and the first two are deliberately different things:
   arguments fold away; markdown is rendered.
 - **Activity** — the milestone view: their current plan, which steps are done, and the
   notable events (leave requested, task finished, failures). No raw tool traffic.
-- **Mail** — everything they have received and sent.
+- **Mail** — everything they have received and sent, with the same archiving as your
+  own inbox: file a letter out of your view per message, or sweep a whole section
+  with **Archive all**. The agent still has it — archiving hides a letter from you,
+  not from them.
 - **Configuration** — model, permissions, skills, MCP servers, shift, supervisor.
 - **Memory** — their memory, one file per topic, editable.
 
@@ -218,6 +225,12 @@ answer from the instruments, not from memory:
 | `propose_reassignment` | move someone between projects, departments or supervisors |
 | `propose_shift` | put someone on a standing shift, or take them off |
 | `propose_dismissal` | let someone go — grave, always goes to you |
+
+Dismissal moves someone to **Unemployment**, at the foot of the Staff panel. They
+give up their desk, their place in the chain of command and any standing shift, but
+their record is kept whole — so every message they ever sent still carries their
+name instead of turning into "unknown". From there you may take them back on, or
+remove them from the record for good. Only the second is irreversible.
 
 Every `propose_` instrument raises an approval and **blocks until it is answered**.
 An agent may propose to hire; it may not hire unsanctioned.

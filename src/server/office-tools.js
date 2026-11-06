@@ -53,7 +53,9 @@ function senderName(fromAgentId) {
 /** Find a colleague by id, exact name, or case-insensitive name. */
 function findAgent(ref) {
   if (!ref) return null;
-  const agents = store.state.agents;
+  // Only staff still on the payroll can be written to; someone out of work
+  // has no desk to deliver to.
+  const agents = store.staff();
   return (
     agents.find((a) => a.id === ref) ||
     agents.find((a) => a.name === ref) ||
@@ -71,6 +73,8 @@ export function postMessage({ fromAgentId, toAgentId, subject, body }) {
     body,
     at: Date.now(),
     read: false,
+    // Archived is Lord Marcos's own filing, not the recipient's.
+    archived: false,
   };
   store.state.messages.unshift(message);
   if (store.state.messages.length > 2000) store.state.messages.length = 2000;
@@ -113,7 +117,7 @@ export function buildOfficeServer(agentId) {
 
           const recipient = findAgent(to);
           if (!recipient) {
-            const names = store.state.agents.map((a) => a.name).join(', ');
+            const names = store.staff().map((a) => a.name).join(', ');
             return text(
               `There is no one by the name "${to}" in this office. The staff are: ` +
                 `${names}. You may also write to "${lord}" himself.`
@@ -364,7 +368,8 @@ export function buildOfficeServer(agentId) {
         {},
         async () => {
           const lines = store.state.departments.map((d) => {
-            const staff = store.state.agents
+            const staff = store
+              .staff()
               .filter((a) => a.departmentId === d.id)
               .map(
                 (a) =>

@@ -735,7 +735,7 @@ export function workerState(agentId) {
 
 export function allWorkerStates() {
   const out = {};
-  for (const agent of store.state.agents) out[agent.id] = workerState(agent.id);
+  for (const agent of store.staff()) out[agent.id] = workerState(agent.id);
   return out;
 }
 

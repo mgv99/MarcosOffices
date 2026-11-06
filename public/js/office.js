@@ -269,7 +269,7 @@ export class OfficeMap {
     });
 
     // Desks: every seat gets one, occupied or not.
-    const staff = this.state.agents.filter((a) => a.departmentId === dept.id);
+    const staff = this.state.agents.filter((a) => a.departmentId === dept.id && !a.firedAt);
     for (let seat = 0; seat < dept.seats; seat++) {
       const agent = staff.find((a) => a.seat === seat) || null;
       this._drawDesk(dept, seat, agent);
@@ -381,7 +381,9 @@ export class OfficeMap {
       if (p.x < -200 || p.x > rect.width + 200) continue;
 
       const theme = themeFor(dept.theme);
-      const staff = this.state.agents.filter((a) => a.departmentId === dept.id).length;
+      const staff = this.state.agents.filter(
+        (a) => a.departmentId === dept.id && !a.firedAt
+      ).length;
       const label = `${dept.name.toUpperCase()}  ${staff}/${dept.seats}`;
 
       ctx.font = '700 11px ui-monospace, Menlo, Consolas, monospace';
@@ -403,7 +405,9 @@ export class OfficeMap {
     ctx.font = `600 ${fontSize}px ui-monospace, Menlo, Consolas, monospace`;
 
     for (const dept of this.state.departments) {
-      for (const agent of this.state.agents.filter((a) => a.departmentId === dept.id)) {
+      for (const agent of this.state.agents.filter(
+        (a) => a.departmentId === dept.id && !a.firedAt
+      )) {
         const desk = this.deskPosition(dept, agent.seat);
         const p = toScreen(desk.x + TILE, desk.y + TILE + 10);
         if (p.x < -100 || p.x > rect.width + 100) continue;
